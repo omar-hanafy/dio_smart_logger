@@ -1,0 +1,5 @@
+# Local artifacts not meant for package publication.
+CleanShot*.png
+pana.json
+.DS_Store
+

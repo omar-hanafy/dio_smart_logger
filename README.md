@@ -23,7 +23,7 @@ Add the dependency:
 
 ```yaml
 dependencies:
-  dio_smart_logger: ^0.1.0
+  dio_smart_logger: ^0.1.1
 ```
 
 Then run:
