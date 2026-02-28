@@ -219,15 +219,18 @@ class DioLoggerConfig {
 
   bool get _canLogErrors => enabled && level.index >= DioLogLevel.error.index;
 
-  /// Returns true when this request should be logged in [onRequest].
+  /// Returns true when this request should be logged in
+  /// [DioLoggerInterceptor.onRequest].
   bool shouldLogRequest(RequestOptions o) =>
       _canLogInfo && logRequest && (requestFilter?.call(o) ?? true);
 
-  /// Returns true when this response should be logged in [onResponse].
+  /// Returns true when this response should be logged in
+  /// [DioLoggerInterceptor.onResponse].
   bool shouldLogResponse(RequestOptions o) =>
       _canLogInfo && logResponse && (requestFilter?.call(o) ?? true);
 
-  /// Returns true when this failure should be logged in [onError].
+  /// Returns true when this failure should be logged in
+  /// [DioLoggerInterceptor.onError].
   bool shouldLogError(RequestOptions o) =>
       _canLogErrors && logError && (requestFilter?.call(o) ?? true);
 
