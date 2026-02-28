@@ -1194,11 +1194,7 @@ class DioLoggerInterceptor extends Interceptor {
 
   String _prettyJson(dynamic data) {
     try {
-      // Use encodedJsonString from dart_helper_utils for Maps
-      if (data is Map) {
-        return data.encodedJsonString;
-      }
-      // For lists and other types, use standard JSON encoder
+      // Use standard JSON encoder with custom fallback for non-JSON-safe values.
       return JsonEncoder.withIndent('  ', _jsonFallbackEncodable).convert(data);
     } catch (_) {
       return data.toString();
@@ -1206,12 +1202,39 @@ class DioLoggerInterceptor extends Interceptor {
   }
 
   Object? _jsonFallbackEncodable(Object? value) {
-    if (value is Map) return value.encodableCopy;
-    if (value is Set) return value.toList();
-    if (value is Iterable) return value.toList();
+    return _toJsonEncodable(value);
+  }
+
+  dynamic _toJsonEncodable(dynamic value, {Set<Object>? seen}) {
+    seen ??= Set<Object>.identity();
+
+    if (value == null || value is String || value is num || value is bool) {
+      return value;
+    }
+
     if (value is Enum) return value.name;
     if (value is DateTime) return value.toIso8601String();
-    return value?.toString();
+
+    if (value is Map) {
+      if (!seen.add(value)) return '<cycle>';
+      final map = <String, dynamic>{};
+      for (final entry in value.entries) {
+        map[entry.key.toString()] = _toJsonEncodable(entry.value, seen: seen);
+      }
+      return map;
+    }
+
+    if (value is Set) {
+      if (!seen.add(value)) return '<cycle>';
+      return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+    }
+
+    if (value is Iterable) {
+      if (!seen.add(value)) return '<cycle>';
+      return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+    }
+
+    return value.toString();
   }
 
   String _safeJsonEncode(dynamic data) {
