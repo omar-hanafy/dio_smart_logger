@@ -23,7 +23,7 @@ Add the dependency:
 
 ```yaml
 dependencies:
-  dio_smart_logger: ^0.1.0-dev.1
+  dio_smart_logger: ^0.1.0
 ```
 
 Then run:
@@ -124,4 +124,3 @@ dio_smart_logger-v<version>
 ## License
 
 MIT - see [LICENSE](LICENSE).
-
