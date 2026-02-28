@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2-dev.1] - 2026-02-28
+- First development pre-release on the `dev` channel after 0.1.1.
+- No functional changes from 0.1.1.
+
 ## [0.1.1] - 2026-02-28
 - Updated `dart_helper_utils` to `^6.0.0` to keep dependencies current.
 - No API changes.
