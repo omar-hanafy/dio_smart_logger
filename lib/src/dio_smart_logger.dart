@@ -3,8 +3,9 @@ import 'dart:developer' as dev;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:dart_helper_utils/dart_helper_utils.dart';
 import 'package:dio/dio.dart';
+import 'package:dio_smart_logger/src/consts.dart';
+import 'package:dio_smart_logger/src/extension.dart';
 
 /// Log severity levels - ordering matters for filtering
 enum DioLogLevel {
@@ -278,7 +279,7 @@ class DioLoggerInterceptor extends Interceptor {
   final Set<String> _headerBlacklistLower;
 
   // Internal keys for storing context in request extras
-  static const String _ctxKey = '__ultimate_dio_logger_ctx__';
+  static const String _ctxKey = '__dio_smart_logger_ctx__';
 
   // REQUEST
 
@@ -338,7 +339,7 @@ class DioLoggerInterceptor extends Interceptor {
           options.queryParameters.isNotEmptyOrNull) {
         _section(lines, 'Query Parameters');
         final sanitizedQuery =
-            _sanitizeMap(options.queryParameters) as Map<dynamic, dynamic>;
+            _sanitizeData(options.queryParameters) as Map<dynamic, dynamic>;
         _printMap(lines, sanitizedQuery);
       }
 
@@ -358,7 +359,7 @@ class DioLoggerInterceptor extends Interceptor {
       final extras = Map<String, dynamic>.from(options.extra)..remove(_ctxKey);
       if (config._canLogDebug && extras.isNotEmptyOrNull) {
         _section(lines, 'Extras');
-        _printMap(lines, _sanitizeMap(extras) as Map<dynamic, dynamic>);
+        _printMap(lines, _sanitizeData(extras) as Map<dynamic, dynamic>);
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -433,12 +434,12 @@ class DioLoggerInterceptor extends Interceptor {
       _kv(lines, 'Duration', '$duration ms');
 
       // ───────────────────────────────────────────────────────────────────────
-      // Status Code Meaning (using dart_helper_utils httpStatusMessages)
+      // Status Code Meaning
       // ───────────────────────────────────────────────────────────────────────
       if (config.showStatusCodeMeaning && response.statusCode != null) {
-        final standardMsg = httpStatusMessages[response.statusCode];
-        if (standardMsg != null) {
-          _kv(lines, 'Status', '$statusCode $standardMsg');
+        final userMsg = httpStatusUserMessages[statusCode];
+        if (userMsg != null) {
+          _kv(lines, 'Status', userMsg);
         }
       }
 
@@ -449,8 +450,10 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'Redirect Chain (${response.redirects.length})');
         for (var i = 0; i < response.redirects.length; i++) {
           final r = response.redirects[i];
-          lines.writeln(
-            '│ ${i + 1}. [${r.statusCode}] ${r.method} → ${_sanitizeUri(r.location)}',
+          _kv(
+            lines,
+            '${i + 1}. [${r.statusCode}] ${r.method}',
+            _sanitizeUri(r.location),
           );
         }
         _kv(lines, 'Final URI', _sanitizeUri(response.realUri).toString());
@@ -464,7 +467,7 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'Headers');
         final headers = <String, String>{};
         response.headers.forEach((k, v) => headers[k] = v.join(', '));
-        _printMap(lines, _sanitizeMap(headers) as Map<dynamic, dynamic>);
+        _printMap(lines, _sanitizeData(headers) as Map<dynamic, dynamic>);
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -563,17 +566,13 @@ class DioLoggerInterceptor extends Interceptor {
       }
 
       // ─────────────────────────────────────────────────────────────────────────
-      // Status Code Meaning (for badResponse)
+      // Status Code Meaning
       // ─────────────────────────────────────────────────────────────────────────
       if (config.showStatusCodeMeaning && statusCode != null) {
-        final devMessage = _getStatusCodeMeaning(statusCode);
-        final userMessage = _getStatusCodeUserMessage(statusCode);
-        if (devMessage != null) {
-          _kv(lines, 'Technical', devMessage);
-        }
-        if (userMessage != null) {
-          _kv(lines, 'User Hint', userMessage);
-        }
+        final devMsg = httpStatusDevMessages[statusCode];
+        final userMsg = httpStatusUserMessages[statusCode];
+        if (devMsg != null) _kv(lines, 'Technical', devMsg);
+        if (userMsg != null) _kv(lines, 'User Hint', userMsg);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -601,7 +600,7 @@ class DioLoggerInterceptor extends Interceptor {
           lines.writeln('│ Query Parameters:');
           _printMap(
             lines,
-            _sanitizeMap(req.queryParameters) as Map<dynamic, dynamic>,
+            _sanitizeData(req.queryParameters) as Map<dynamic, dynamic>,
             indent: 4,
           );
         }
@@ -641,7 +640,7 @@ class DioLoggerInterceptor extends Interceptor {
           res.headers.forEach((k, v) => headers[k] = v.join(', '));
           _printMap(
             lines,
-            _sanitizeMap(headers) as Map<dynamic, dynamic>,
+            _sanitizeData(headers) as Map<dynamic, dynamic>,
             indent: 4,
           );
         }
@@ -715,9 +714,13 @@ class DioLoggerInterceptor extends Interceptor {
           '│   Configured timeout: ${err.requestOptions.sendTimeout}',
         );
         if (err.requestOptions.data != null) {
-          lines.writeln(
-            '│   Data size: ${_formatBytes(_estimateSize(err.requestOptions.data))}',
+          final size = _estimateSizeFast(
+            err.requestOptions.data,
+            allowJsonEstimate: false,
           );
+          if (size != null) {
+            lines.writeln('│   Data size: ${_formatBytes(size)}');
+          }
         }
         _printUnderlyingError(lines, err.error);
 
@@ -821,18 +824,6 @@ class DioLoggerInterceptor extends Interceptor {
     lines.writeln('│   └─');
   }
 
-  // STATUS CODE MEANINGS (using dart_helper_utils)
-
-  String? _getStatusCodeMeaning(int statusCode) {
-    // Uses httpStatusDevMessage from dart_helper_utils for developer-focused messages
-    return httpStatusDevMessage[statusCode];
-  }
-
-  String? _getStatusCodeUserMessage(int statusCode) {
-    // Uses httpStatusUserMessage from dart_helper_utils for user-friendly messages
-    return httpStatusUserMessage[statusCode];
-  }
-
   // CURL GENERATOR
 
   String _generateCurl(RequestOptions options) {
@@ -863,7 +854,7 @@ class DioLoggerInterceptor extends Interceptor {
           components.add("-F '$key=@$filename'");
         }
       } else if (options.data is Map || options.data is List) {
-        final sanitized = _sanitizeMap(options.data);
+        final sanitized = _sanitizeData(options.data);
         final json = _escapeShellArg(_safeJsonEncode(sanitized));
         components.add("--data-raw '$json'");
       } else if (options.data is String) {
@@ -888,11 +879,12 @@ class DioLoggerInterceptor extends Interceptor {
   void _boxTop(StringBuffer sb, String title, String color) {
     final c = config.useColors ? color : '';
     final r = config.useColors ? _AnsiColors.reset : '';
+    final titleWidth = _visualWidth(title);
     sb
       ..writeln('')
       ..writeln('$c┌${'─' * (config.maxLineWidth - 2)}┐$r')
       ..writeln(
-        '$c│ $title${' ' * math.max(0, config.maxLineWidth - title.length - 4)}│$r',
+        '$c│ $title${' ' * math.max(0, config.maxLineWidth - titleWidth - 4)}│$r',
       )
       ..writeln('$c├${'─' * (config.maxLineWidth - 2)}┤$r');
   }
@@ -903,11 +895,50 @@ class DioLoggerInterceptor extends Interceptor {
     sb.writeln('$c└${'─' * (config.maxLineWidth - 2)}┘$r');
   }
 
+  /// Estimates the visual column width of [text] in a monospace terminal.
+  ///
+  /// Emoji and wide Unicode characters occupy 2 columns, zero-width modifiers
+  /// (variation selectors, ZWJ) occupy 0 columns.
+  static int _visualWidth(String text) {
+    var width = 0;
+    for (final rune in text.runes) {
+      if (_isZeroWidth(rune)) continue;
+      width += _isWideChar(rune) ? 2 : 1;
+    }
+    return width;
+  }
+
+  static bool _isZeroWidth(int rune) =>
+      // Variation selectors
+      (rune >= 0xFE00 && rune <= 0xFE0F) ||
+      // Zero-width joiner / non-joiner
+      rune == 0x200D ||
+      rune == 0x200C ||
+      // Combining diacritical marks (common ranges)
+      (rune >= 0x0300 && rune <= 0x036F) ||
+      // Skin tone modifiers
+      (rune >= 0x1F3FB && rune <= 0x1F3FF);
+
+  static bool _isWideChar(int rune) =>
+      // Miscellaneous symbols & pictographs, emoticons, transport symbols, etc.
+      (rune >= 0x1F300 && rune <= 0x1FAFF) ||
+      // Dingbats (heavy check mark, cross mark, etc.)
+      (rune >= 0x2700 && rune <= 0x27BF) ||
+      // Miscellaneous technical (hourglass, watch, etc.)
+      (rune >= 0x2300 && rune <= 0x23FF) ||
+      // Enclosed alphanumerics supplement (circled numbers, etc.)
+      (rune >= 0x1F100 && rune <= 0x1F1FF) ||
+      // CJK unified ideographs
+      (rune >= 0x4E00 && rune <= 0x9FFF) ||
+      // Fullwidth forms
+      (rune >= 0xFF01 && rune <= 0xFF60);
+
   void _section(StringBuffer sb, String title) {
+    final titleWidth = _visualWidth(title);
     sb
       ..writeln('│')
       ..writeln(
-        '├─── $title ${'─' * math.max(0, config.maxLineWidth - title.length - 8)}',
+        '├─── $title ${'─' * math.max(0, config.maxLineWidth - titleWidth - 8)}',
       );
   }
 
@@ -1004,7 +1035,7 @@ class DioLoggerInterceptor extends Interceptor {
 
     // Map/List - pretty print JSON
     if (data is Map || data is List) {
-      final sanitized = _sanitizeMap(data);
+      final sanitized = _sanitizeData(data);
       final json = _prettyJson(sanitized);
       final truncated = _truncateIfNeeded(json);
       for (final line in truncated.split('\n')) {
@@ -1028,7 +1059,7 @@ class DioLoggerInterceptor extends Interceptor {
       try {
         final decoded = jsonDecode(data);
         if (decoded is Map || decoded is List) {
-          final sanitized = _sanitizeMap(decoded);
+          final sanitized = _sanitizeData(decoded);
           final json = _prettyJson(sanitized);
           final truncated = _truncateIfNeeded(json);
           for (final line in truncated.split('\n')) {
@@ -1114,11 +1145,13 @@ class DioLoggerInterceptor extends Interceptor {
           (_isSensitiveKey(key) || _looksLikeSensitiveValue(value))) {
         result[key] = '***MASKED***';
       } else {
-        result[key] = _sanitizeMap(value);
+        result[key] = _sanitizeData(value);
       }
     }
     return result;
   }
+
+  static final _base64urlRegExp = RegExp(r'^[A-Za-z0-9_-]+$');
 
   bool _looksLikeSensitiveValue(Object? value) {
     if (!config.maskSensitiveData) return false;
@@ -1127,12 +1160,18 @@ class DioLoggerInterceptor extends Interceptor {
     if (v.isEmpty) return false;
     final lower = v.toLowerCase();
     if (lower.startsWith('bearer ') || lower.startsWith('basic ')) return true;
+    // JWT: three base64url-encoded segments separated by dots.
+    // Require base64url charset to avoid matching package names, bundle IDs,
+    // or version strings that happen to have 3 dot-separated segments.
     final parts = v.split('.');
-    if (parts.length == 3 && parts.every((p) => p.length >= 8)) return true;
+    if (parts.length == 3 &&
+        parts.every((p) => p.length >= 8 && _base64urlRegExp.hasMatch(p))) {
+      return true;
+    }
     return false;
   }
 
-  dynamic _sanitizeMap(dynamic data, {Set<Object>? seen}) {
+  dynamic _sanitizeData(dynamic data, {Set<Object>? seen}) {
     if (!config.maskSensitiveData) return data;
     seen ??= Set<Object>.identity();
 
@@ -1144,7 +1183,7 @@ class DioLoggerInterceptor extends Interceptor {
         if (_isSensitiveKey(key)) {
           result[entry.key] = '***MASKED***';
         } else {
-          result[entry.key] = _sanitizeMap(entry.value, seen: seen);
+          result[entry.key] = _sanitizeData(entry.value, seen: seen);
         }
       }
       return result;
@@ -1152,7 +1191,7 @@ class DioLoggerInterceptor extends Interceptor {
 
     if (data is List) {
       if (!seen.add(data)) return '<cycle>';
-      return data.map((e) => _sanitizeMap(e, seen: seen)).toList();
+      return data.map((e) => _sanitizeData(e, seen: seen)).toList();
     }
 
     return data;
