@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-30
+
+### Added
+- `dio` 5.10 support: the new `DioExceptionType.transformTimeout` gets a dedicated
+  forensic block, and `transform` is shown in the "Timeouts" summary.
+- Configuration presets: `DioLoggerConfig.development()`, `.production()`, and
+  `.errorsOnly()`.
+- Per-request opt-out: set
+  `Options(extra: {DioLoggerInterceptor.disableLoggingKey: true})` to skip all
+  logging for a single request.
+- HTTP protocol version logging on responses, when the adapter reports it
+  (`Response.extra`, dio 5.9.2+ on the IO adapter).
+- A "Rate Limit" section that surfaces `retry-after` and `x-ratelimit-*` /
+  `ratelimit-*` headers on responses and errors.
+
+### Changed
+- Raised the minimum `dio` constraint to `^5.10.0`.
+- cURL generation now mirrors Dio's request transformer: `x-www-form-urlencoded`
+  bodies are URL-encoded (previously always JSON), GET bodies are included, the
+  body honors an explicit `logRequestBody: false`, and oversized bodies are
+  omitted instead of logged in full.
+- Per-request state moved off `RequestOptions.extra` to an internal `Expando`, so
+  the logger no longer writes entries into your `extra` map, and a retried request
+  is timed fresh instead of reporting a stale duration.
+
+### Fixed
+- **Security:** sensitive-looking values (e.g. `Bearer` tokens and JWTs) are now
+  masked in bodies and query parameters even under non-obvious keys.
+- **Security:** large non-JSON string bodies are no longer previewed unsanitized.
+- Binary (`Uint8List`/typed) data is no longer expanded into a number array in
+  bodies or cURL.
+- Values shared across sibling branches are no longer mislabeled as `<cycle>`.
+- A throwing custom `printer` can no longer escape the interceptor and disrupt the
+  request.
+- Body truncation no longer splits a surrogate pair.
+
 ## [0.2.0] - 2026-03-01
 
 ### Added

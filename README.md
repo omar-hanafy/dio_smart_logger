@@ -14,6 +14,9 @@ A production-focused logging interceptor for [Dio](https://pub.dev/packages/dio)
 - **Performance Metrics:** Track request duration, payload size, and transfer rate.
 - **Advanced Error Diagnostics:** Detailed root-cause analysis mapped by `DioExceptionType`.
 - **Flexibility:** Optional request filtering and custom printer callbacks.
+- **Ready-made Presets:** `DioLoggerConfig.development()`, `.production()`, and `.errorsOnly()`.
+- **Per-request Opt-out:** Skip logging for a single request via a request `extra` flag.
+- **Protocol & Rate-limit Insight:** Logs the negotiated HTTP version and surfaces rate-limit headers.
 
 ## 📦 Installation
 
@@ -21,7 +24,7 @@ Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dio_smart_logger: ^0.2.0 # Or the latest version
+  dio_smart_logger: ^0.3.0 # Or the latest version
 ```
 
 Then run:
@@ -57,6 +60,24 @@ dio.interceptors.add(
   ),
 );
 ```
+
+### Presets
+
+Skip the boilerplate with a ready-made configuration:
+
+```dart
+// Verbose logs, cURL, colors - ideal for local development.
+dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.development()));
+
+// Errors only, no bodies or cURL, no colors - a safe default for release builds.
+dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.production()));
+
+// Only failed requests, but with full forensic detail (snapshots, cURL).
+dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.errorsOnly()));
+```
+
+> Tip: add the logger as the **last** request interceptor (so it is the first to
+> see the response) for the most representative `Duration` measurement.
 
 ## 🛠️ Advanced Configuration
 
@@ -99,9 +120,21 @@ final interceptor = DioLoggerInterceptor(
 );
 ```
 
+### Skipping a Single Request
+
+To suppress logging for one specific request (e.g. a noisy health check or a sensitive endpoint), set the opt-out flag in its `extra`:
+
+```dart
+dio.get(
+  '/health',
+  options: Options(extra: {DioLoggerInterceptor.disableLoggingKey: true}),
+);
+```
+
 ## 🔒 Security Notes
 
 - **Auto-Masking:** By default, common sensitive keys (like passwords, tokens, API keys) are masked with `***MASKED***`.
+- **Value-based Masking:** Sensitive-looking values (e.g. `Bearer` tokens and JWTs) are masked even when they appear under a non-obvious key.
 - **Custom Secrets:** You can extend the list of masked keys for your project:
   ```dart
   DioLoggerConfig(

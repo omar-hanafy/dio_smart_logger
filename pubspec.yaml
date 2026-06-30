@@ -1,6 +1,6 @@
 name: dio_smart_logger
 description: Structured and secure Dio logging interceptor with cURL output, performance metrics, and deep error diagnostics.
-version: 0.2.0
+version: 0.3.0
 repository: https://github.com/omar-hanafy/dio_smart_logger
 issue_tracker: https://github.com/omar-hanafy/dio_smart_logger/issues
 homepage: https://github.com/omar-hanafy/dio_smart_logger
@@ -14,8 +14,8 @@ environment:
   sdk: ^3.11.0
 
 dependencies:
-  dio: ^5.9.1
+  dio: ^5.10.0
 
 dev_dependencies:
   lints: ^6.1.0
-  test: ^1.30.0
+  test: ^1.31.2

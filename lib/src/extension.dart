@@ -1,5 +1,7 @@
-/// Extensions for nullable String helpers.
-extension DHUNullSafeStringExtensions on String? {
+// Internal null-safety helpers. Not exported as part of the public API.
+
+/// Nullable [String] helpers.
+extension NullableStringX on String? {
   /// Returns true if the string is null, empty, or solely made of whitespace characters.
   bool get isEmptyOrNull => this == null || this!.trim().isEmpty;
 
@@ -15,8 +17,8 @@ extension DHUNullSafeStringExtensions on String? {
   bool get isNotBlank => isNotEmptyOrNull;
 }
 
-/// DHUMapNullableExtension
-extension DHUMapNullableExtension<K, V> on Map<K, V>? {
+/// Nullable [Map] helpers.
+extension NullableMapX<K, V> on Map<K, V>? {
   /// Returns `true` when the map is `null` or empty.
   bool get isEmptyOrNull => this == null || this!.isEmpty;
 
@@ -24,8 +26,8 @@ extension DHUMapNullableExtension<K, V> on Map<K, V>? {
   bool get isNotEmptyOrNull => !isEmptyOrNull;
 }
 
-/// Utility extensions for nullable iterables.
-extension DHUCollectionsExtensionsNS<E> on Iterable<E>? {
+/// Nullable [Iterable] helpers.
+extension NullableIterableX<E> on Iterable<E>? {
   /// Returns `true` if this nullable iterable is either null or empty.
   bool get isEmptyOrNull => this == null || this!.isEmpty;
 
