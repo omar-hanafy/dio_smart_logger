@@ -95,6 +95,31 @@ class DioLoggerConfig {
        assert(maxBodyBytes >= 0, 'maxBodyBytes must be >= 0'),
        assert(maxBinaryPreviewBytes >= 0, 'maxBinaryPreviewBytes must be >= 0');
 
+  /// Verbose configuration for local development: full bodies, cURL,
+  /// performance metrics, and colors.
+  factory DioLoggerConfig.development() => const DioLoggerConfig(
+    level: DioLogLevel.verbose,
+    showCurl: true,
+    showPerformanceMetrics: true,
+  );
+
+  /// Locked-down configuration for production: errors only, no bodies, no
+  /// cURL, no stack traces, no colors. A safe default for release builds.
+  factory DioLoggerConfig.production() => const DioLoggerConfig(
+    level: DioLogLevel.error,
+    useColors: false,
+    showCurl: false,
+    logErrorRequestSnapshot: false,
+    logErrorResponseSnapshot: false,
+    logCallSiteStackTrace: false,
+    logErrorStackTrace: false,
+  );
+
+  /// Logs only failed requests, but with full forensic detail (request and
+  /// response snapshots, cURL, and call-site stack trace).
+  factory DioLoggerConfig.errorsOnly() =>
+      const DioLoggerConfig(level: DioLogLevel.error);
+
   /// Master switch for this interceptor.
   final bool enabled;
 
@@ -110,7 +135,10 @@ class DioLoggerConfig {
   /// Uses dart:developer log to prevent truncation (recommended for IDE consoles)
   final bool useDartDeveloperLog;
 
-  /// Maximum line width before wrapping
+  /// Width of the framed log box (the `┌─┐` border and section rules).
+  ///
+  /// Long values are not wrapped to this width; it only sizes the box border.
+  /// Must be >= 20.
   final int maxLineWidth;
 
   /// When true, multi-line sections (e.g. cURL, JSON bodies) are printed
@@ -155,7 +183,11 @@ class DioLoggerConfig {
   /// Include response body/headers in error logs (if response exists)
   final bool logErrorResponseSnapshot;
 
-  /// Log where the request was initiated (Dio 5.9.0 sourceStackTrace)
+  /// Log where the request was initiated, using Dio's `sourceStackTrace`.
+  ///
+  /// Best-effort: this reads an `@internal` Dio field (added in 5.9.0), so a
+  /// future Dio release could change or remove it. The value is null-checked
+  /// and any failure is contained by the interceptor's own error handling.
   final bool logCallSiteStackTrace;
 
   /// Log DioException's stackTrace
@@ -194,7 +226,9 @@ class DioLoggerConfig {
   // Truncation
   // ─────────────────────────────────────────────────────────────────────────────
 
-  /// Max body size to log (prevents freezing on large responses)
+  /// Max body size to log, in UTF-16 code units (equivalent to bytes for
+  /// ASCII content). Prevents freezing on large responses: rendered bodies are
+  /// truncated past this size, and oversized cURL bodies are omitted entirely.
   final int maxBodyBytes;
 
   /// For binary data, show first N bytes
@@ -258,6 +292,12 @@ class DioLoggerConfig {
 ///
 /// It prints structured logs with request metadata, response snapshots, and
 /// actionable error diagnostics while masking sensitive values.
+///
+/// The reported `Duration` is measured between this interceptor's `onRequest`
+/// and its `onResponse`/`onError`, so it reflects the interceptor's own view of
+/// the round trip rather than the full end-to-end time. For the most
+/// representative numbers, add this logger so it is the *last* request
+/// interceptor (and therefore the *first* to see the response).
 class DioLoggerInterceptor extends Interceptor {
   /// Creates a logger interceptor with the provided [config].
   ///
@@ -273,29 +313,38 @@ class DioLoggerInterceptor extends Interceptor {
           .map((e) => e.toLowerCase())
           .toSet();
 
+  /// Set `Options(extra: {DioLoggerInterceptor.disableLoggingKey: true})` on a
+  /// request to suppress all logging (and timing) for that single request.
+  static const String disableLoggingKey = 'dio_smart_logger.disable';
+
   /// Runtime configuration that controls output and filtering behavior.
   final DioLoggerConfig config;
   final List<String> _sensitiveKeyFragmentsLower;
   final Set<String> _headerBlacklistLower;
 
-  // Internal keys for storing context in request extras
-  static const String _ctxKey = '__dio_smart_logger_ctx__';
+  // Per-request state keyed on RequestOptions identity. An Expando keeps this
+  // out of the user-visible `extra` map, and makes a copied RequestOptions
+  // (e.g. a retry interceptor's copyWith) get a fresh context instead of
+  // sharing a stale, already-stopped stopwatch by reference.
+  final Expando<_LogContext> _contexts = Expando<_LogContext>(
+    'dio_smart_logger',
+  );
 
   // REQUEST
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     if (_shouldCaptureContext(options) && _getCtx(options) == null) {
-      options.extra[_ctxKey] = _LogContext.start();
+      _contexts[options] = _LogContext.start();
     }
 
-    if (!config.shouldLogRequest(options)) {
+    if (_isLoggingDisabled(options) || !config.shouldLogRequest(options)) {
       handler.next(options);
       return;
     }
 
     final ctx = _getCtx(options) ?? _LogContext.start();
-    options.extra[_ctxKey] = ctx;
+    _contexts[options] = ctx;
 
     try {
       final lines = StringBuffer();
@@ -328,7 +377,8 @@ class DioLoggerInterceptor extends Interceptor {
           'Timeouts',
           'connect=${options.connectTimeout ?? "∞"} | '
               'send=${options.sendTimeout ?? "∞"} | '
-              'receive=${options.receiveTimeout ?? "∞"}',
+              'receive=${options.receiveTimeout ?? "∞"} | '
+              'transform=${options.transformTimeout ?? "∞"}',
         );
       }
 
@@ -356,7 +406,7 @@ class DioLoggerInterceptor extends Interceptor {
       // ───────────────────────────────────────────────────────────────────────
       // Extras
       // ───────────────────────────────────────────────────────────────────────
-      final extras = Map<String, dynamic>.from(options.extra)..remove(_ctxKey);
+      final extras = options.extra;
       if (config._canLogDebug && extras.isNotEmptyOrNull) {
         _section(lines, 'Extras');
         _printMap(lines, _sanitizeData(extras) as Map<dynamic, dynamic>);
@@ -402,9 +452,9 @@ class DioLoggerInterceptor extends Interceptor {
     final req = response.requestOptions;
     final ctx = _getCtx(req);
     ctx?.stopwatch.stop();
-    req.extra.remove(_ctxKey);
+    _contexts[req] = null;
 
-    if (!config.shouldLogResponse(req)) {
+    if (_isLoggingDisabled(req) || !config.shouldLogResponse(req)) {
       handler.next(response);
       return;
     }
@@ -432,6 +482,12 @@ class DioLoggerInterceptor extends Interceptor {
       );
       _kv(lines, 'URI', _sanitizeUri(response.realUri).toString());
       _kv(lines, 'Duration', '$duration ms');
+
+      // HTTP protocol version, when the adapter reports it (Dio 5.9.2+, IO).
+      final httpVersion = response.extra[HttpClientAdapter.extraKeyHttpVersion];
+      if (httpVersion != null) {
+        _kv(lines, 'HTTP Version', httpVersion);
+      }
 
       // ───────────────────────────────────────────────────────────────────────
       // Status Code Meaning
@@ -469,6 +525,8 @@ class DioLoggerInterceptor extends Interceptor {
         response.headers.forEach((k, v) => headers[k] = v.join(', '));
         _printMap(lines, _sanitizeData(headers) as Map<dynamic, dynamic>);
       }
+
+      _maybePrintRateLimit(lines, response.headers);
 
       // ───────────────────────────────────────────────────────────────────────
       // Performance Metrics
@@ -531,9 +589,9 @@ class DioLoggerInterceptor extends Interceptor {
     final req = err.requestOptions;
     final ctx = _getCtx(req);
     ctx?.stopwatch.stop();
-    req.extra.remove(_ctxKey);
+    _contexts[req] = null;
 
-    if (!config.shouldLogError(req)) {
+    if (_isLoggingDisabled(req) || !config.shouldLogError(req)) {
       handler.next(err);
       return;
     }
@@ -581,6 +639,12 @@ class DioLoggerInterceptor extends Interceptor {
       _section(lines, 'Root Cause Analysis');
       _printErrorDetails(lines, err);
 
+      // Rate-limit headers are high-value on 429/503 errors; surface them
+      // regardless of the response-snapshot setting.
+      if (err.response != null) {
+        _maybePrintRateLimit(lines, err.response!.headers);
+      }
+
       // ─────────────────────────────────────────────────────────────────────────
       // Request Snapshot
       // ─────────────────────────────────────────────────────────────────────────
@@ -593,7 +657,8 @@ class DioLoggerInterceptor extends Interceptor {
           'Timeouts',
           'connect=${req.connectTimeout ?? "∞"} | '
               'send=${req.sendTimeout ?? "∞"} | '
-              'receive=${req.receiveTimeout ?? "∞"}',
+              'receive=${req.receiveTimeout ?? "∞"} | '
+              'transform=${req.transformTimeout ?? "∞"}',
         );
 
         if (req.queryParameters.isNotEmptyOrNull) {
@@ -732,6 +797,15 @@ class DioLoggerInterceptor extends Interceptor {
         );
         _printUnderlyingError(lines, err.error);
 
+      case DioExceptionType.transformTimeout:
+        lines.writeln('│ ⏱️ TRANSFORM TIMEOUT');
+        lines.writeln('│   Response data transformation took too long.');
+        lines.writeln('│   (e.g. background JSON decoding of a large payload)');
+        lines.writeln(
+          '│   Configured timeout: ${err.requestOptions.transformTimeout}',
+        );
+        _printUnderlyingError(lines, err.error);
+
       case DioExceptionType.badCertificate:
         lines.writeln('│ 🔒 BAD CERTIFICATE');
         lines.writeln('│   SSL/TLS certificate validation failed.');
@@ -829,7 +903,8 @@ class DioLoggerInterceptor extends Interceptor {
   String _generateCurl(RequestOptions options) {
     final components = <String>['curl -X ${options.method}'];
 
-    // Headers
+    // Headers. curl recomputes Content-Length from the actual body, so a
+    // stale value carried in the request options would corrupt the command.
     _sanitizeHeaders(options.headers).forEach((key, value) {
       if (key.toLowerCase() != 'content-length') {
         final escapedValue = _escapeShellArg(value.toString());
@@ -837,34 +912,10 @@ class DioLoggerInterceptor extends Interceptor {
       }
     });
 
-    // Body
-    if (options.data != null && options.method.toUpperCase() != 'GET') {
-      if (options.data is FormData) {
-        final formData = options.data as FormData;
-        for (final field in formData.fields) {
-          final key = _escapeShellArg(field.key);
-          final value = _isSensitiveKey(field.key)
-              ? '***MASKED***'
-              : _escapeShellArg(field.value);
-          components.add("-F '$key=$value'");
-        }
-        for (final file in formData.files) {
-          final key = _escapeShellArg(file.key);
-          final filename = file.value.filename ?? 'file';
-          components.add("-F '$key=@$filename'");
-        }
-      } else if (options.data is Map || options.data is List) {
-        final sanitized = _sanitizeData(options.data);
-        final json = _escapeShellArg(_safeJsonEncode(sanitized));
-        components.add("--data-raw '$json'");
-      } else if (options.data is String) {
-        final sanitized = _escapeShellArg(options.data as String);
-        components.add("--data-raw '$sanitized'");
-      } else if (options.data is Uint8List || options.data is List<int>) {
-        components.add('# <binary data omitted>');
-      } else if (options.data is Stream) {
-        components.add('# <stream data omitted>');
-      }
+    // Body. Dio sends a body whenever data != null regardless of method, so
+    // GET bodies are included too.
+    if (options.data != null) {
+      components.addAll(_curlBodyArgs(options));
     }
 
     // URL (sanitized)
@@ -872,6 +923,89 @@ class DioLoggerInterceptor extends Interceptor {
     components.add("'$uri'");
 
     return components.join(' \\\n  ');
+  }
+
+  /// Builds the cURL body argument(s), mirroring how Dio serializes the
+  /// request body so the command reproduces the real request.
+  List<String> _curlBodyArgs(RequestOptions options) {
+    final data = options.data;
+    if (data == null) return const [];
+
+    // Honor an explicit request-body opt-out: if the user turned body logging
+    // off, keep it out of the reproducible command too.
+    if (config.logRequestBody == false) {
+      return const ['# <body omitted: request body logging disabled>'];
+    }
+
+    // FormData -> repeated -F flags (never finalize the stream).
+    if (data is FormData) {
+      final parts = <String>[];
+      for (final field in data.fields) {
+        final key = _escapeShellArg(field.key);
+        final value = _isSensitiveKey(field.key)
+            ? '***MASKED***'
+            : _escapeShellArg(field.value);
+        parts.add("-F '$key=$value'");
+      }
+      for (final file in data.files) {
+        final key = _escapeShellArg(file.key);
+        final filename = _escapeShellArg(file.value.filename ?? 'file');
+        parts.add("-F '$key=@$filename'");
+      }
+      return parts;
+    }
+
+    // Binary/stream must be matched before List (Uint8List is a List<int>).
+    if (data is TypedData || data is List<int>) {
+      return const ['# <binary data omitted>'];
+    }
+    if (data is Stream) {
+      return const ['# <stream data omitted>'];
+    }
+
+    final body = _curlEncodeBody(data, options);
+    if (body == null || body.isEmpty) return const [];
+
+    // A reproducible command needs a complete body; truncating produces an
+    // invalid request, so oversized bodies are omitted entirely.
+    if (config.maxBodyBytes > 0 && body.length > config.maxBodyBytes) {
+      return [
+        '# <body omitted: ${_formatBytes(body.length)} exceeds maxBodyBytes>',
+      ];
+    }
+
+    return ["--data-raw '${_escapeShellArg(body)}'"];
+  }
+
+  /// Serializes [data] the way Dio's default request transformer
+  /// ([Transformer.defaultTransformRequest]) would, so the cURL body matches
+  /// the bytes actually sent on the wire.
+  String? _curlEncodeBody(Object data, RequestOptions options) {
+    // Strings are sent verbatim by Dio.
+    if (data is String) return data;
+
+    // JSON content type -> JSON encode.
+    if (Transformer.isJsonMimeType(options.contentType)) {
+      return _safeJsonEncode(_sanitizeData(data));
+    }
+
+    // Otherwise Dio url-encodes a Map<String, dynamic>.
+    if (data is Map) {
+      final sanitized = _sanitizeData(data);
+      if (sanitized is Map) {
+        return Transformer.urlEncodeMap(
+          sanitized.map((k, v) => MapEntry(k.toString(), v)),
+          options.listFormat,
+        );
+      }
+    }
+
+    // Lists and other shapes: best-effort JSON.
+    if (data is Map || data is List) {
+      return _safeJsonEncode(_sanitizeData(data));
+    }
+
+    return data.toString();
   }
 
   // FORMATTING HELPERS
@@ -1044,31 +1178,38 @@ class DioLoggerInterceptor extends Interceptor {
       return;
     }
 
-    // String - try to parse as JSON, otherwise print raw
+    // String - pretty-print when it is JSON, otherwise print raw (bounded).
     if (data is String) {
-      if (data.length > config.maxBodyBytes) {
-        sb.writeln(
-          '$prefix$indentStr<String truncated: ${_formatBytes(data.length)}>',
-        );
-        final previewLen = math.min(200, data.length);
-        sb.writeln('$prefix$indentStr${data.substring(0, previewLen)}...');
-        return;
+      // Only attempt a JSON parse when the payload actually looks like JSON;
+      // avoids walking a large non-JSON blob (e.g. an HTML error page) just to
+      // have the decode fail at the end.
+      final trimmed = data.trimLeft();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          final decoded = jsonDecode(data);
+          if (decoded is Map || decoded is List) {
+            // Sanitize the parsed structure first, so secrets are masked
+            // before any truncation, then bound the rendered output.
+            final sanitized = _sanitizeData(decoded);
+            final json = _prettyJson(sanitized);
+            final truncated = _truncateIfNeeded(json);
+            for (final line in truncated.split('\n')) {
+              sb.writeln('$prefix$indentStr$line');
+            }
+            return;
+          }
+        } catch (_) {
+          // Malformed JSON - fall through to raw handling.
+        }
       }
 
-      // Try parsing as JSON
-      try {
-        final decoded = jsonDecode(data);
-        if (decoded is Map || decoded is List) {
-          final sanitized = _sanitizeData(decoded);
-          final json = _prettyJson(sanitized);
-          final truncated = _truncateIfNeeded(json);
-          for (final line in truncated.split('\n')) {
-            sb.writeln('$prefix$indentStr$line');
-          }
-          return;
-        }
-      } catch (_) {
-        // Not JSON, print raw
+      // Non-JSON. Never print an unsanitized preview of an oversized blob - a
+      // secret could sit anywhere in it. Report the size instead.
+      if (data.length > config.maxBodyBytes) {
+        sb.writeln(
+          '$prefix$indentStr<String body omitted: ${_formatBytes(data.length)}>',
+        );
+        return;
       }
 
       final truncated = _truncateIfNeeded(data);
@@ -1175,23 +1316,44 @@ class DioLoggerInterceptor extends Interceptor {
     if (!config.maskSensitiveData) return data;
     seen ??= Set<Object>.identity();
 
+    // Binary payloads must never be expanded into number arrays.
+    if (data is TypedData) {
+      return '<binary: ${_formatBytes(data.lengthInBytes)}>';
+    }
+
     if (data is Map) {
+      // Track the current path, not a global visited set, so a value shared
+      // across sibling branches (a DAG) is not mistaken for a cycle.
       if (!seen.add(data)) return '<cycle>';
-      final result = <dynamic, dynamic>{};
-      for (final entry in data.entries) {
-        final key = entry.key.toString();
-        if (_isSensitiveKey(key)) {
-          result[entry.key] = '***MASKED***';
-        } else {
-          result[entry.key] = _sanitizeData(entry.value, seen: seen);
+      try {
+        final result = <dynamic, dynamic>{};
+        for (final entry in data.entries) {
+          final key = entry.key.toString();
+          if (_isSensitiveKey(key)) {
+            result[entry.key] = '***MASKED***';
+          } else {
+            result[entry.key] = _sanitizeData(entry.value, seen: seen);
+          }
         }
+        return result;
+      } finally {
+        seen.remove(data);
       }
-      return result;
     }
 
     if (data is List) {
       if (!seen.add(data)) return '<cycle>';
-      return data.map((e) => _sanitizeData(e, seen: seen)).toList();
+      try {
+        return data.map((e) => _sanitizeData(e, seen: seen)).toList();
+      } finally {
+        seen.remove(data);
+      }
+    }
+
+    // Value-based redaction for sensitive-looking leaves (e.g. "Bearer ..."
+    // or a JWT) even when the surrounding key is neutral.
+    if (_looksLikeSensitiveValue(data)) {
+      return '***MASKED***';
     }
 
     return data;
@@ -1204,19 +1366,51 @@ class DioLoggerInterceptor extends Interceptor {
 
   // UTILITIES
 
-  _LogContext? _getCtx(RequestOptions req) {
-    final v = req.extra[_ctxKey];
-    return v is _LogContext ? v : null;
-  }
+  _LogContext? _getCtx(RequestOptions req) => _contexts[req];
+
+  /// Whether the caller opted this single request out via [disableLoggingKey].
+  bool _isLoggingDisabled(RequestOptions o) =>
+      o.extra[disableLoggingKey] == true;
 
   bool _shouldCaptureContext(RequestOptions options) {
     if (!config.enabled) return false;
+    if (_isLoggingDisabled(options)) return false;
     if (!(config.requestFilter?.call(options) ?? true)) return false;
     if (!config._canLogErrors && !config._canLogInfo) return false;
     return config.logRequest ||
         config.logResponse ||
         config.logError ||
         config.showPerformanceMetrics;
+  }
+
+  // Common rate-limiting/throttling response headers (lowercased).
+  static const Set<String> _rateLimitHeaders = {
+    'retry-after',
+    'x-ratelimit-limit',
+    'x-ratelimit-remaining',
+    'x-ratelimit-reset',
+    'x-rate-limit-limit',
+    'x-rate-limit-remaining',
+    'x-rate-limit-reset',
+    'ratelimit-limit',
+    'ratelimit-remaining',
+    'ratelimit-reset',
+  };
+
+  /// Surfaces rate-limit headers (when present) in their own section,
+  /// independent of the header-logging level since they are high-value
+  /// diagnostics on `429`/`503` responses.
+  void _maybePrintRateLimit(StringBuffer lines, Headers headers) {
+    final found = <String, String>{};
+    for (final name in _rateLimitHeaders) {
+      final values = headers[name];
+      if (values != null && values.isNotEmpty) {
+        found[name] = values.join(', ');
+      }
+    }
+    if (found.isEmpty) return;
+    _section(lines, 'Rate Limit');
+    found.forEach((key, value) => _kv(lines, key, value));
   }
 
   int? _getContentLength(Headers headers) {
@@ -1253,24 +1447,40 @@ class DioLoggerInterceptor extends Interceptor {
 
     if (value is Enum) return value.name;
     if (value is DateTime) return value.toIso8601String();
+    // Must precede the Iterable branch: typed binary is an Iterable<int>.
+    if (value is TypedData) {
+      return '<binary: ${_formatBytes(value.lengthInBytes)}>';
+    }
 
     if (value is Map) {
       if (!seen.add(value)) return '<cycle>';
-      final map = <String, dynamic>{};
-      for (final entry in value.entries) {
-        map[entry.key.toString()] = _toJsonEncodable(entry.value, seen: seen);
+      try {
+        final map = <String, dynamic>{};
+        for (final entry in value.entries) {
+          map[entry.key.toString()] = _toJsonEncodable(entry.value, seen: seen);
+        }
+        return map;
+      } finally {
+        seen.remove(value);
       }
-      return map;
     }
 
     if (value is Set) {
       if (!seen.add(value)) return '<cycle>';
-      return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+      try {
+        return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+      } finally {
+        seen.remove(value);
+      }
     }
 
     if (value is Iterable) {
       if (!seen.add(value)) return '<cycle>';
-      return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+      try {
+        return value.map((e) => _toJsonEncodable(e, seen: seen)).toList();
+      } finally {
+        seen.remove(value);
+      }
     }
 
     return value.toString();
@@ -1287,8 +1497,14 @@ class DioLoggerInterceptor extends Interceptor {
   String _truncateIfNeeded(String text) {
     if (config.maxBodyBytes <= 0) return text;
     if (text.length <= config.maxBodyBytes) return text;
-    return '${text.substring(0, config.maxBodyBytes)}\n... (truncated, total: ${_formatBytes(text.length)})';
+    var cut = config.maxBodyBytes;
+    // Don't slice through a surrogate pair, which would emit a lone surrogate.
+    if (_isHighSurrogate(text.codeUnitAt(cut - 1))) cut -= 1;
+    return '${text.substring(0, cut)}\n... (truncated, total: ${_formatBytes(text.length)})';
   }
+
+  static bool _isHighSurrogate(int codeUnit) =>
+      codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
 
   int _estimateSize(dynamic data) {
     if (data == null) return 0;
@@ -1326,18 +1542,36 @@ class DioLoggerInterceptor extends Interceptor {
   }
 
   void _emit(String message, {bool isError = false}) {
-    if (config.printer != null) {
-      config.printer!(message);
-    } else if (config.useDartDeveloperLog) {
-      // Using dart:developer prevents truncation in IDE consoles
-      dev.log(
-        message,
-        name: 'DIO',
-        level: isError ? 1000 : 0, // 1000 = severe
-      );
-    } else {
-      // Fallback to print (may truncate in some environments)
+    // A logging sink must never break the request. If a custom printer (or any
+    // sink) throws, fall back to dart:developer and, failing that, swallow.
+    try {
+      if (config.printer != null) {
+        config.printer!(message);
+        return;
+      }
+      if (config.useDartDeveloperLog) {
+        // Using dart:developer prevents truncation in IDE consoles.
+        dev.log(
+          message,
+          name: 'DIO',
+          level: isError ? 1000 : 0, // 1000 = severe
+        );
+        return;
+      }
+      // Fallback to print (may truncate in some environments).
       print(message);
+    } catch (e, st) {
+      try {
+        dev.log(
+          'DioLoggerInterceptor output sink threw: $e',
+          name: 'DIO',
+          level: 1000,
+          error: e,
+          stackTrace: st,
+        );
+      } catch (_) {
+        // Nothing left to do - never rethrow from the logger.
+      }
     }
   }
 
