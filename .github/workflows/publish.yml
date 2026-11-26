@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'dio_smart_logger-v*'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,3 +13,6 @@ jobs:
     permissions:
       id-token: write
     uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: .
+      use-flutter: false

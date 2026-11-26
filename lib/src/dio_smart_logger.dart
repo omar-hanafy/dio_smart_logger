@@ -295,9 +295,8 @@ class DioLoggerConfig {
 ///
 /// The reported `Duration` is measured between this interceptor's `onRequest`
 /// and its `onResponse`/`onError`, so it reflects the interceptor's own view of
-/// the round trip rather than the full end-to-end time. For the most
-/// representative numbers, add this logger so it is the *last* request
-/// interceptor (and therefore the *first* to see the response).
+/// the round trip. Dio runs request and response interceptors in registration
+/// order. This interval includes response processing by earlier interceptors.
 class DioLoggerInterceptor extends Interceptor {
   /// Creates a logger interceptor with the provided [config].
   ///
@@ -319,6 +318,7 @@ class DioLoggerInterceptor extends Interceptor {
 
   /// Runtime configuration that controls output and filtering behavior.
   final DioLoggerConfig config;
+  static const _masked = '***MASKED***';
   final List<String> _sensitiveKeyFragmentsLower;
   final Set<String> _headerBlacklistLower;
 
@@ -348,7 +348,7 @@ class DioLoggerInterceptor extends Interceptor {
 
     try {
       final lines = StringBuffer();
-      final sanitizedUri = _sanitizeUri(options.uri);
+      final sanitizedUri = _requestUri(options);
 
       // ───────────────────────────────────────────────────────────────────────
       // Header
@@ -359,15 +359,19 @@ class DioLoggerInterceptor extends Interceptor {
         _AnsiColors.cyan,
       );
       _kv(lines, 'URI', sanitizedUri.toString());
-      _kv(lines, 'BaseURL', options.baseUrl);
-      _kv(lines, 'Path', options.path);
+      _kv(lines, 'BaseURL', _displayUri(options.baseUrl));
+      _kv(lines, 'Path', _displayUri(options.path));
 
       // ───────────────────────────────────────────────────────────────────────
       // Request Configuration
       // ───────────────────────────────────────────────────────────────────────
       if (config._canLogDebug) {
         _section(lines, 'Configuration');
-        _kv(lines, 'ContentType', options.contentType);
+        _kv(
+          lines,
+          'ContentType',
+          _headerValue(Headers.contentTypeHeader, options.contentType),
+        );
         _kv(lines, 'ResponseType', options.responseType.name);
         _kv(lines, 'FollowRedirects', options.followRedirects);
         _kv(lines, 'MaxRedirects', options.maxRedirects);
@@ -417,7 +421,7 @@ class DioLoggerInterceptor extends Interceptor {
       // ───────────────────────────────────────────────────────────────────────
       if (config.effectiveLogRequestBody && options.data != null) {
         _section(lines, 'Body');
-        _printBody(lines, options.data, isRequest: true);
+        _printBody(lines, options.data, contentType: options.contentType);
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -427,7 +431,7 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'cURL');
         _printMultiline(
           lines,
-          _generateCurl(options),
+          _generateCurl(options, sanitizedUri),
           indent: config.makeSectionsCopyable ? 0 : 2,
           copyable: config.makeSectionsCopyable,
         );
@@ -480,7 +484,8 @@ class DioLoggerInterceptor extends Interceptor {
         '${response.statusCode} ${response.statusMessage ?? ""}',
         color,
       );
-      _kv(lines, 'URI', _sanitizeUri(response.realUri).toString());
+      final displayedUri = _responseUri(response);
+      _kv(lines, 'URI', displayedUri);
       _kv(lines, 'Duration', '$duration ms');
 
       // HTTP protocol version, when the adapter reports it (Dio 5.9.2+, IO).
@@ -512,7 +517,7 @@ class DioLoggerInterceptor extends Interceptor {
             _sanitizeUri(r.location),
           );
         }
-        _kv(lines, 'Final URI', _sanitizeUri(response.realUri).toString());
+        _kv(lines, 'Final URI', displayedUri);
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -521,9 +526,7 @@ class DioLoggerInterceptor extends Interceptor {
       if (config.effectiveLogResponseHeaders &&
           response.headers.map.isNotEmptyOrNull) {
         _section(lines, 'Headers');
-        final headers = <String, String>{};
-        response.headers.forEach((k, v) => headers[k] = v.join(', '));
-        _printMap(lines, _sanitizeData(headers) as Map<dynamic, dynamic>);
+        _printMap(lines, _sanitizeHeaders(response.headers.map));
       }
 
       _maybePrintRateLimit(lines, response.headers);
@@ -569,7 +572,13 @@ class DioLoggerInterceptor extends Interceptor {
           lines.writeln('│ <Stream> (not logged to avoid consumption)');
         } else if (response.data != null) {
           _section(lines, 'Body');
-          _printBody(lines, response.data, isRequest: false);
+          _printBody(
+            lines,
+            response.data,
+            contentType:
+                response.headers[Headers.contentTypeHeader]?.firstOrNull,
+            responseType: req.responseType,
+          );
         }
       }
 
@@ -612,7 +621,8 @@ class DioLoggerInterceptor extends Interceptor {
         '❌ ERROR [${ctx?.id ?? "-"}] ${req.method}$statusPart',
         _AnsiColors.red,
       );
-      _kv(lines, 'URI', _sanitizeUri(req.uri).toString());
+      final sanitizedUri = _requestUri(req);
+      _kv(lines, 'URI', sanitizedUri);
       _kv(lines, 'Duration', '$duration ms');
       _kv(lines, 'Type', err.type.name);
 
@@ -651,7 +661,11 @@ class DioLoggerInterceptor extends Interceptor {
       if (config.logErrorRequestSnapshot) {
         _section(lines, 'Request Snapshot');
         _kv(lines, 'Method', req.method);
-        _kv(lines, 'ContentType', req.contentType);
+        _kv(
+          lines,
+          'ContentType',
+          _headerValue(Headers.contentTypeHeader, req.contentType),
+        );
         _kv(
           lines,
           'Timeouts',
@@ -677,7 +691,7 @@ class DioLoggerInterceptor extends Interceptor {
 
         if (req.data != null) {
           lines.writeln('│ Body:');
-          _printBody(lines, req.data, isRequest: true, indent: 4);
+          _printBody(lines, req.data, contentType: req.contentType, indent: 4);
         }
       }
 
@@ -688,7 +702,7 @@ class DioLoggerInterceptor extends Interceptor {
         final res = err.response!;
         _section(lines, 'Response Snapshot');
         _kv(lines, 'Status', '${res.statusCode} ${res.statusMessage ?? ""}');
-        _kv(lines, 'Real URI', _sanitizeUri(res.realUri).toString());
+        _kv(lines, 'Real URI', _responseUri(res));
 
         if (res.redirects.isNotEmptyOrNull) {
           lines.writeln('│ Redirects:');
@@ -701,18 +715,18 @@ class DioLoggerInterceptor extends Interceptor {
 
         if (res.headers.map.isNotEmptyOrNull) {
           lines.writeln('│ Headers:');
-          final headers = <String, String>{};
-          res.headers.forEach((k, v) => headers[k] = v.join(', '));
-          _printMap(
-            lines,
-            _sanitizeData(headers) as Map<dynamic, dynamic>,
-            indent: 4,
-          );
+          _printMap(lines, _sanitizeHeaders(res.headers.map), indent: 4);
         }
 
         if (res.data != null) {
           lines.writeln('│ Body:');
-          _printBody(lines, res.data, isRequest: false, indent: 4);
+          _printBody(
+            lines,
+            res.data,
+            contentType: res.headers[Headers.contentTypeHeader]?.firstOrNull,
+            responseType: req.responseType,
+            indent: 4,
+          );
         }
       }
 
@@ -723,7 +737,7 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'Retry cURL');
         _printMultiline(
           lines,
-          _generateCurl(req),
+          _generateCurl(req, sanitizedUri),
           indent: config.makeSectionsCopyable ? 0 : 2,
           copyable: config.makeSectionsCopyable,
         );
@@ -851,7 +865,7 @@ class DioLoggerInterceptor extends Interceptor {
 
     if (message != null && message.trim().isNotEmpty) {
       lines.writeln('│   │ Message: $message');
-    } else {
+    } else if (error is! FormatException) {
       lines.writeln('│   │ $error');
     }
 
@@ -880,47 +894,53 @@ class DioLoggerInterceptor extends Interceptor {
 
     try {
       final uri = e.uri;
-      if (uri != null) {
-        lines.writeln('│   │ URI: $uri');
+      if (uri is Uri || uri is String) {
+        lines.writeln('│   │ URI: ${_displayUri(uri.toString())}');
       }
     } catch (_) {}
 
-    try {
-      final source = e.source;
-      if (source != null) {
-        final s = source.toString();
-        lines.writeln(
-          '│   │ Source: ${s.length > 100 ? '${s.substring(0, 100)}...' : s}',
-        );
-      }
-    } catch (_) {}
+    // Parser input can contain a raw request or response body.
+    if (!config.maskSensitiveData &&
+        config.logErrorRequestSnapshot &&
+        config.logErrorResponseSnapshot) {
+      try {
+        final source = e.source;
+        if (source != null) {
+          final s = source.toString();
+          lines.writeln(
+            '│   │ Source: ${s.length > 100 ? '${s.substring(0, 100)}...' : s}',
+          );
+        }
+      } catch (_) {}
+    }
 
     lines.writeln('│   └─');
   }
 
   // CURL GENERATOR
 
-  String _generateCurl(RequestOptions options) {
-    final components = <String>['curl -X ${options.method}'];
+  String _generateCurl(RequestOptions options, Uri uri) {
+    final method = options.method;
+    final methodArg = RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(method)
+        ? method
+        : "'${_escapeShellArg(method)}'";
+    final components = <String>['curl -X $methodArg'];
 
     // Headers. curl recomputes Content-Length from the actual body, so a
     // stale value carried in the request options would corrupt the command.
     _sanitizeHeaders(options.headers).forEach((key, value) {
       if (key.toLowerCase() != 'content-length') {
-        final escapedValue = _escapeShellArg(value.toString());
-        components.add("-H '$key: $escapedValue'");
+        components.add("-H '${_escapeShellArg('$key: $value')}'");
       }
     });
 
-    // Body. Dio sends a body whenever data != null regardless of method, so
-    // GET bodies are included too.
+    // The URL must precede any trailing body-omission comment.
+    components.add("'${_escapeShellArg(uri.toString())}'");
+
+    // Dio sends a body whenever data is non-null, including GET requests.
     if (options.data != null) {
       components.addAll(_curlBodyArgs(options));
     }
-
-    // URL (sanitized)
-    final uri = _sanitizeUri(options.uri);
-    components.add("'$uri'");
 
     return components.join(' \\\n  ');
   }
@@ -928,7 +948,7 @@ class DioLoggerInterceptor extends Interceptor {
   /// Builds the cURL body argument(s), mirroring how Dio serializes the
   /// request body so the command reproduces the real request.
   List<String> _curlBodyArgs(RequestOptions options) {
-    final data = options.data;
+    final Object? data = options.data;
     if (data == null) return const [];
 
     // Honor an explicit request-body opt-out: if the user turned body logging
@@ -942,21 +962,25 @@ class DioLoggerInterceptor extends Interceptor {
       final parts = <String>[];
       for (final field in data.fields) {
         final key = _escapeShellArg(field.key);
-        final value = _isSensitiveKey(field.key)
-            ? '***MASKED***'
-            : _escapeShellArg(field.value);
-        parts.add("-F '$key=$value'");
+        final value = _shouldMask(field.key, field.value)
+            ? _masked
+            : field.value;
+        parts.add("--form-string '$key=${_escapeShellArg(value)}'");
       }
       for (final file in data.files) {
         final key = _escapeShellArg(file.key);
-        final filename = _escapeShellArg(file.value.filename ?? 'file');
+        final name = file.value.filename ?? 'file';
+        final filename = _escapeShellArg(
+          _shouldMask(file.key, name) ? _masked : name,
+        );
         parts.add("-F '$key=@$filename'");
       }
       return parts;
     }
 
     // Binary/stream must be matched before List (Uint8List is a List<int>).
-    if (data is TypedData || data is List<int>) {
+    if ((data is TypedData || data is List<int>) &&
+        !_isJsonNumberList(data, options.contentType)) {
       return const ['# <binary data omitted>'];
     }
     if (data is Stream) {
@@ -981,12 +1005,13 @@ class DioLoggerInterceptor extends Interceptor {
   /// ([Transformer.defaultTransformRequest]) would, so the cURL body matches
   /// the bytes actually sent on the wire.
   String? _curlEncodeBody(Object data, RequestOptions options) {
-    // Strings are sent verbatim by Dio.
-    if (data is String) return data;
+    if (data is String) {
+      return _renderStringBody(data, options.contentType, pretty: false);
+    }
 
     // JSON content type -> JSON encode.
     if (Transformer.isJsonMimeType(options.contentType)) {
-      return _safeJsonEncode(_sanitizeData(data));
+      return _safeJsonEncode(data is List<num> ? data : _sanitizeData(data));
     }
 
     // Otherwise Dio url-encodes a Map<String, dynamic>.
@@ -1109,8 +1134,9 @@ class DioLoggerInterceptor extends Interceptor {
 
   void _printBody(
     StringBuffer sb,
-    dynamic data, {
-    required bool isRequest,
+    Object? data, {
+    String? contentType,
+    ResponseType? responseType,
     int indent = 2,
   }) {
     final indentStr = ' ' * indent;
@@ -1127,8 +1153,8 @@ class DioLoggerInterceptor extends Interceptor {
       if (data.fields.isNotEmpty) {
         sb.writeln('$prefix${indentStr}Fields:');
         for (final field in data.fields) {
-          final value = _isSensitiveKey(field.key)
-              ? '***MASKED***'
+          final value = _shouldMask(field.key, field.value)
+              ? _masked
               : field.value;
           sb.writeln('$prefix$indentStr  ${field.key}: $value');
         }
@@ -1136,8 +1162,10 @@ class DioLoggerInterceptor extends Interceptor {
       if (data.files.isNotEmpty) {
         sb.writeln('$prefix${indentStr}Files:');
         for (final file in data.files) {
+          final name = file.value.filename ?? 'unnamed';
+          final filename = _shouldMask(file.key, name) ? _masked : name;
           sb.writeln(
-            '$prefix$indentStr  ${file.key}: ${file.value.filename ?? "unnamed"} '
+            '$prefix$indentStr  ${file.key}: $filename '
             '(${_formatBytes(file.value.length)}, ${file.value.contentType})',
           );
         }
@@ -1146,12 +1174,10 @@ class DioLoggerInterceptor extends Interceptor {
     }
 
     // Binary data - show preview
-    if (data is Uint8List) {
+    if (data is List<int> &&
+        (responseType == ResponseType.bytes ||
+            !_isJsonNumberList(data, contentType))) {
       _printBinaryPreview(sb, data, indent);
-      return;
-    }
-    if (data is List<int>) {
-      _printBinaryPreview(sb, Uint8List.fromList(data), indent);
       return;
     }
 
@@ -1169,7 +1195,9 @@ class DioLoggerInterceptor extends Interceptor {
 
     // Map/List - pretty print JSON
     if (data is Map || data is List) {
-      final sanitized = _sanitizeData(data);
+      final sanitized = _isJsonNumberList(data, contentType)
+          ? data
+          : _sanitizeData(data);
       final json = _prettyJson(sanitized);
       final truncated = _truncateIfNeeded(json);
       for (final line in truncated.split('\n')) {
@@ -1178,42 +1206,14 @@ class DioLoggerInterceptor extends Interceptor {
       return;
     }
 
-    // String - pretty-print when it is JSON, otherwise print raw (bounded).
     if (data is String) {
-      // Only attempt a JSON parse when the payload actually looks like JSON;
-      // avoids walking a large non-JSON blob (e.g. an HTML error page) just to
-      // have the decode fail at the end.
-      final trimmed = data.trimLeft();
-      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-        try {
-          final decoded = jsonDecode(data);
-          if (decoded is Map || decoded is List) {
-            // Sanitize the parsed structure first, so secrets are masked
-            // before any truncation, then bound the rendered output.
-            final sanitized = _sanitizeData(decoded);
-            final json = _prettyJson(sanitized);
-            final truncated = _truncateIfNeeded(json);
-            for (final line in truncated.split('\n')) {
-              sb.writeln('$prefix$indentStr$line');
-            }
-            return;
-          }
-        } catch (_) {
-          // Malformed JSON - fall through to raw handling.
-        }
-      }
-
-      // Non-JSON. Never print an unsanitized preview of an oversized blob - a
-      // secret could sit anywhere in it. Report the size instead.
-      if (data.length > config.maxBodyBytes) {
-        sb.writeln(
-          '$prefix$indentStr<String body omitted: ${_formatBytes(data.length)}>',
-        );
-        return;
-      }
-
-      final truncated = _truncateIfNeeded(data);
-      for (final line in truncated.split('\n')) {
+      final text = _renderStringBody(
+        data,
+        contentType,
+        pretty: true,
+        decodedJson: responseType == ResponseType.json,
+      );
+      for (final line in text.split('\n')) {
         sb.writeln('$prefix$indentStr$line');
       }
       return;
@@ -1223,7 +1223,67 @@ class DioLoggerInterceptor extends Interceptor {
     sb.writeln('$prefix$indentStr${data.runtimeType}: $data');
   }
 
-  void _printBinaryPreview(StringBuffer sb, Uint8List bytes, int indent) {
+  // Dio sends Uint8List as bytes even when the request declares JSON.
+  bool _isJsonNumberList(Object data, String? contentType) =>
+      data is List<num> &&
+      data is! Uint8List &&
+      Transformer.isJsonMimeType(contentType);
+
+  String _renderStringBody(
+    String text,
+    String? contentType, {
+    required bool pretty,
+    bool decodedJson = false,
+  }) {
+    if (!pretty && !config.maskSensitiveData) return text;
+
+    final trimmed = text.trimLeft();
+    if (trimmed.startsWith('{') ||
+        trimmed.startsWith('[') ||
+        (trimmed.startsWith('"') && Transformer.isJsonMimeType(contentType))) {
+      var redacted = false;
+      try {
+        final decoded = jsonDecode(
+          text,
+          reviver: (key, value) {
+            if ((config.maskSensitiveData &&
+                    key is String &&
+                    _isSensitiveKey(key)) ||
+                _looksLikeSensitiveValue(value)) {
+              redacted = true;
+              return _masked;
+            }
+            return value;
+          },
+        );
+        if (pretty) return _truncateIfNeeded(_prettyJson(decoded));
+        // Preserve the exact wire spelling when nothing needed masking.
+        return redacted ? jsonEncode(decoded) : text;
+      } on FormatException {
+        if (!decodedJson &&
+            config.maskSensitiveData &&
+            Transformer.isJsonMimeType(contentType)) {
+          return '<malformed JSON omitted>';
+        }
+      }
+    }
+
+    final mime = contentType?.split(';').first.trim().toLowerCase();
+    if (mime == Headers.formUrlEncodedContentType) {
+      final safe = _sanitizeEncodedFields(text);
+      return pretty ? _truncateIfNeeded(safe) : safe;
+    }
+    if (_looksLikeSensitiveValue(text)) return _masked;
+
+    // Omit oversized opaque text in full: an arbitrary prefix may contain
+    // credentials. Structured values above have already been sanitized.
+    if (pretty && text.length > config.maxBodyBytes) {
+      return '<String body omitted: ${_formatBytes(text.length)}>';
+    }
+    return text;
+  }
+
+  void _printBinaryPreview(StringBuffer sb, List<int> bytes, int indent) {
     final indentStr = ' ' * indent;
     final prefix = config.makeSectionsCopyable ? '' : '│';
     sb.writeln('$prefix$indentStr[Binary] ${_formatBytes(bytes.length)}');
@@ -1231,7 +1291,7 @@ class DioLoggerInterceptor extends Interceptor {
       final previewLen = math.min(config.maxBinaryPreviewBytes, bytes.length);
       final preview = bytes
           .take(previewLen)
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .map((b) => (b & 0xff).toRadixString(16).padLeft(2, '0'))
           .join(' ');
       sb.writeln(
         '$prefix${indentStr}Preview: $preview${bytes.length > previewLen ? '...' : ''}',
@@ -1254,71 +1314,134 @@ class DioLoggerInterceptor extends Interceptor {
 
   // SANITIZATION
 
+  Uri _requestUri(RequestOptions options) {
+    if (!config.maskSensitiveData || options.queryParameters.isEmpty) {
+      return _sanitizeUri(options.uri);
+    }
+    // CSV, pipe and space-separated parameters lose their element boundaries
+    // after Dio serializes them. Mask each supplied value first.
+    final display = options.copyWith(
+      queryParameters: {
+        for (final entry in options.queryParameters.entries)
+          entry.key: _sanitizeData(entry.value, forQuery: true),
+      },
+    );
+    return _sanitizeUri(display.uri);
+  }
+
+  Uri _responseUri(Response<dynamic> response) => response.redirects.isEmpty
+      ? _requestUri(response.requestOptions)
+      : _sanitizeUri(response.realUri);
+
+  String _displayUri(String text) {
+    if (!config.maskSensitiveData || text.isEmpty) return text;
+    final uri = Uri.tryParse(text);
+    return uri == null ? '<invalid URI>' : _sanitizeUri(uri).toString();
+  }
+
   Uri _sanitizeUri(Uri uri) {
     if (!config.maskSensitiveData) return uri;
-    if (uri.queryParameters.isEmpty) return uri;
-
-    final sanitizedParams = <String, dynamic>{};
-    uri.queryParametersAll.forEach((key, values) {
-      if (_isSensitiveKey(key)) {
-        sanitizedParams[key] = values.map((_) => '***MASKED***').toList();
-      } else {
-        sanitizedParams[key] = values;
-      }
-    });
-
-    return uri.replace(queryParameters: sanitizedParams);
+    return uri.replace(
+      userInfo: uri.userInfo.isEmpty ? null : _masked,
+      query: uri.hasQuery ? _sanitizeEncodedFields(uri.query) : null,
+    );
   }
 
-  Map<String, dynamic> _sanitizeHeaders(Map<String, dynamic> headers) {
-    final result = <String, dynamic>{};
-    for (final entry in headers.entries) {
-      final key = entry.key;
-      final lowerKey = key.toLowerCase();
+  // Preserve repeated fields, their order and original encoding. Decode only
+  // for matching, so a URI or form with no sensitive fields keeps its spelling.
+  String _sanitizeEncodedFields(String fields) {
+    if (!config.maskSensitiveData || fields.isEmpty) return fields;
+    return fields
+        .split('&')
+        .map((field) {
+          final separator = field.indexOf('=');
+          if (separator < 0) return field;
+          final encodedKey = field.substring(0, separator);
+          try {
+            final key = Uri.decodeQueryComponent(encodedKey);
+            final value = Uri.decodeQueryComponent(
+              field.substring(separator + 1),
+            );
+            if (_shouldMask(key, value)) {
+              return '$encodedKey=${Uri.encodeQueryComponent(_masked)}';
+            }
+          } on ArgumentError {
+            return _masked;
+          } on FormatException {
+            return _masked;
+          }
+          return field;
+        })
+        .join('&');
+  }
 
-      // Skip blacklisted headers
-      if (_headerBlacklistLower.contains(lowerKey)) {
-        continue;
-      }
+  bool _shouldMask(String key, Object? value) =>
+      config.maskSensitiveData &&
+      (_isSensitiveKey(key) || _looksLikeSensitiveValue(value));
 
-      final value = entry.value;
-      if (config.maskSensitiveData &&
-          (_isSensitiveKey(key) || _looksLikeSensitiveValue(value))) {
-        result[key] = '***MASKED***';
-      } else {
-        result[key] = _sanitizeData(value);
+  Map<String, Object?> _sanitizeHeaders(Map<String, Object?> headers) => {
+    for (final entry in headers.entries)
+      entry.key: ?_headerValue(entry.key, entry.value),
+  };
+
+  Object? _headerValue(String key, Object? value) {
+    final name = key.toLowerCase();
+    if (value == null || _headerBlacklistLower.contains(name)) return null;
+    if (config.maskSensitiveData && _isSensitiveKey(key)) return _masked;
+
+    Object? sanitize(Object? item) {
+      if ((item is String || item is Uri) &&
+          (name == 'location' ||
+              name == 'content-location' ||
+              name == 'referer')) {
+        return _looksLikeSensitiveValue(item)
+            ? _masked
+            : _displayUri(item.toString());
       }
+      return _sanitizeData(item);
     }
-    return result;
+
+    return value is Iterable ? value.map(sanitize).join(', ') : sanitize(value);
   }
 
-  static final _base64urlRegExp = RegExp(r'^[A-Za-z0-9_-]+$');
+  static final _credentialsPrefix = RegExp(
+    r'^(bearer|basic) ',
+    caseSensitive: false,
+  );
+  static final _jwtPattern = RegExp(
+    r'^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$',
+  );
 
   bool _looksLikeSensitiveValue(Object? value) {
-    if (!config.maskSensitiveData) return false;
-    if (value is! String) return false;
-    final v = value.trim();
-    if (v.isEmpty) return false;
-    final lower = v.toLowerCase();
-    if (lower.startsWith('bearer ') || lower.startsWith('basic ')) return true;
-    // JWT: three base64url-encoded segments separated by dots.
-    // Require base64url charset to avoid matching package names, bundle IDs,
-    // or version strings that happen to have 3 dot-separated segments.
-    final parts = v.split('.');
-    if (parts.length == 3 &&
-        parts.every((p) => p.length >= 8 && _base64urlRegExp.hasMatch(p))) {
-      return true;
-    }
-    return false;
+    if (!config.maskSensitiveData || value is! String) return false;
+    final trimmed = value.trim();
+    return _credentialsPrefix.hasMatch(trimmed) ||
+        _jwtPattern.hasMatch(trimmed);
   }
 
-  dynamic _sanitizeData(dynamic data, {Set<Object>? seen}) {
+  dynamic _sanitizeData(
+    dynamic data, {
+    Set<Object>? seen,
+    bool forQuery = false,
+  }) {
     if (!config.maskSensitiveData) return data;
     seen ??= Set<Object>.identity();
 
     // Binary payloads must never be expanded into number arrays.
     if (data is TypedData) {
-      return '<binary: ${_formatBytes(data.lengthInBytes)}>';
+      return forQuery ? data : '<binary: ${_formatBytes(data.lengthInBytes)}>';
+    }
+
+    if (data is ListParam) {
+      if (!seen.add(data)) return '<cycle>';
+      try {
+        final values = data.value
+            .map((v) => _sanitizeData(v, seen: seen, forQuery: forQuery))
+            .toList();
+        return ListParam(values, data.format);
+      } finally {
+        seen.remove(data);
+      }
     }
 
     if (data is Map) {
@@ -1330,9 +1453,13 @@ class DioLoggerInterceptor extends Interceptor {
         for (final entry in data.entries) {
           final key = entry.key.toString();
           if (_isSensitiveKey(key)) {
-            result[entry.key] = '***MASKED***';
+            result[entry.key] = _masked;
           } else {
-            result[entry.key] = _sanitizeData(entry.value, seen: seen);
+            result[entry.key] = _sanitizeData(
+              entry.value,
+              seen: seen,
+              forQuery: forQuery,
+            );
           }
         }
         return result;
@@ -1344,7 +1471,9 @@ class DioLoggerInterceptor extends Interceptor {
     if (data is List) {
       if (!seen.add(data)) return '<cycle>';
       try {
-        return data.map((e) => _sanitizeData(e, seen: seen)).toList();
+        return data
+            .map((e) => _sanitizeData(e, seen: seen, forQuery: forQuery))
+            .toList();
       } finally {
         seen.remove(data);
       }
@@ -1353,7 +1482,7 @@ class DioLoggerInterceptor extends Interceptor {
     // Value-based redaction for sensitive-looking leaves (e.g. "Bearer ..."
     // or a JWT) even when the surrounding key is neutral.
     if (_looksLikeSensitiveValue(data)) {
-      return '***MASKED***';
+      return _masked;
     }
 
     return data;
@@ -1401,13 +1530,12 @@ class DioLoggerInterceptor extends Interceptor {
   /// independent of the header-logging level since they are high-value
   /// diagnostics on `429`/`503` responses.
   void _maybePrintRateLimit(StringBuffer lines, Headers headers) {
-    final found = <String, String>{};
-    for (final name in _rateLimitHeaders) {
-      final values = headers[name];
-      if (values != null && values.isNotEmpty) {
-        found[name] = values.join(', ');
-      }
-    }
+    final found = _sanitizeHeaders({
+      for (final entry in headers.map.entries)
+        if (_rateLimitHeaders.contains(entry.key.toLowerCase()) &&
+            entry.value.isNotEmpty)
+          entry.key: entry.value,
+    });
     if (found.isEmpty) return;
     _section(lines, 'Rate Limit');
     found.forEach((key, value) => _kv(lines, key, value));

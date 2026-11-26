@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-26
+
+### Fixed
+
+- Mask URI credentials and sensitive query values in request details, redirects,
+  the `Location`, `Content-Location`, and `Referer` headers, error diagnostics,
+  and cURL output.
+- Apply masking to pre-encoded JSON, URL-encoded forms, and multipart fields in
+  body logs and cURL output. Multipart fields honor `maskSensitiveData: false`.
+- Honor the header blacklist and mask individual header values in response
+  logs, error snapshots, and rate-limit diagnostics. The parser’s raw `source` field is omitted
+  when masking is enabled or either error snapshot is disabled.
+- Render integer lists sent as JSON as arrays. Keep the URL in generated cURL
+  commands when the body is omitted, and quote URLs containing apostrophes.
+
 ## [0.3.0] - 2026-06-30
 
 ### Added
