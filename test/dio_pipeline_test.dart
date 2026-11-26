@@ -273,25 +273,77 @@ void main() {
   );
 
   test(
-    'masks credentials assembled across a space-separated query list',
+    'masks an outer sensitive query key with ambiguous joined values',
     () async {
-      final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
-      final logs = <String>[];
-      final dio = _client(adapter, logs);
-      await dio.get<String>(
-        '/search',
-        queryParameters: {
-          'q': ['Bearer', 'assembled-marker', 'Basic other'],
-        },
-        options: Options(listFormat: ListFormat.ssv),
-      );
-      expect(
-        adapter.request.uri.queryParameters['q'],
-        contains('Bearer assembled-marker'),
-      );
-      _expectHidden(logs.last, ['assembled-marker']);
+      for (final separator in ['#', '&']) {
+        final inputs = {
+          'token': [
+            {'label': 'first${separator}outer-private-tail'},
+          ],
+        };
+        final forwarded = RequestOptions(
+          path: 'https://cdn.example/search',
+          queryParameters: inputs,
+          listFormat: ListFormat.csv,
+        ).uri;
+        final adapter = _RecordingAdapter(
+          ResponseBody.fromString(
+            'ok',
+            200,
+            headers: {
+              'location': [forwarded.toString()],
+            },
+          )..redirects = [RedirectRecord(302, 'GET', forwarded)],
+        );
+        final logs = <String>[];
+        final dio = _client(adapter, logs);
+        final response = await dio.get<String>(
+          '/search',
+          queryParameters: inputs,
+          options: Options(listFormat: ListFormat.csv),
+        );
+        expect(response.realUri, forwarded);
+        expect(adapter.request.queryParameters, inputs);
+        expect(logs.first, contains('REQUEST'));
+        expect(logs.last, contains('RESPONSE'));
+        _expectHidden(logs.join('\n'), ['outer-private-tail']);
+      }
     },
   );
+
+  for (final status in [200, 429]) {
+    test(
+      'masks credentials assembled across an SSV list on HTTP $status',
+      () async {
+        final adapter = _RecordingAdapter(
+          ResponseBody.fromString('result', status),
+        );
+        final logs = <String>[];
+        final dio = _client(adapter, logs);
+        final request = dio.get<String>(
+          '/search',
+          queryParameters: {
+            'q': ['Bearer', 'assembled-marker', 'Basic other'],
+          },
+          options: Options(listFormat: ListFormat.ssv),
+        );
+        if (status == 429) {
+          await expectLater(request, throwsA(isA<DioException>()));
+        } else {
+          await request;
+        }
+        expect(
+          adapter.request.uri.queryParameters['q'],
+          contains('Bearer assembled-marker'),
+        );
+        expect(
+          logs.last,
+          contains(status == 200 ? 'RESPONSE' : 'Request Snapshot'),
+        );
+        _expectHidden(logs.join('\n'), ['assembled-marker']);
+      },
+    );
+  }
 
   test('keeps safe neighbors after a credential in a joined query', () async {
     final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));

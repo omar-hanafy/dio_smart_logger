@@ -147,7 +147,7 @@ dio.get(
   );
   ```
 
-- Use `headerBlacklist` to omit named headers from header output. Header names match case-insensitively. The logger masks URI credentials and sensitive query parameters in `Location`, `Content-Location`, and `Referer`. Add other headers carrying private URLs to the blacklist. When a joined query value contains a credential that crosses URI field boundaries, the logger masks the query and fragment for that request.
+- Use `headerBlacklist` to omit named headers from header output. Header names match case-insensitively. The logger masks URI credentials and sensitive query parameters in `Location`, `Content-Location`, and `Referer`. Add other headers carrying private URLs to the blacklist. If Dio emits a literal field or fragment separator inside a query value, the logger masks that request’s query and fragment because their boundaries are ambiguous.
 
 ## 💡 Example
 

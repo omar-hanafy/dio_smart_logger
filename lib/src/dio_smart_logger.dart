@@ -393,9 +393,7 @@ class DioLoggerInterceptor extends Interceptor {
       if (config.effectiveLogRequestQueryParams &&
           options.queryParameters.isNotEmptyOrNull) {
         _section(lines, 'Query Parameters');
-        final sanitizedQuery =
-            _sanitizeData(options.queryParameters) as Map<dynamic, dynamic>;
-        _printMap(lines, sanitizedQuery);
+        _printQueryParameters(lines, options, queryMasks);
       }
 
       // ───────────────────────────────────────────────────────────────────────
@@ -680,11 +678,7 @@ class DioLoggerInterceptor extends Interceptor {
 
         if (req.queryParameters.isNotEmptyOrNull) {
           lines.writeln('│ Query Parameters:');
-          _printMap(
-            lines,
-            _sanitizeData(req.queryParameters) as Map<dynamic, dynamic>,
-            indent: 4,
-          );
+          _printQueryParameters(lines, req, queryMasks, indent: 4);
         }
 
         if (req.headers.isNotEmptyOrNull) {
@@ -1342,36 +1336,32 @@ class DioLoggerInterceptor extends Interceptor {
   // escaping and path changes still use the original per-element redaction.
   _QueryMasks? _queryMasks(RequestOptions options) {
     final query = options.queryParameters;
-    if (!config.maskSensitiveData ||
-        !query.values.any(
-          (value) => value is List || value is ListParam || value is Map,
-        )) {
+    if (!config.maskSensitiveData || query.isEmpty) return const {};
+    final original = Transformer.urlEncodeQueryMap(query, options.listFormat);
+    // Dio's form encoder escapes delimiters in values while retaining the
+    // same list format and field boundaries. Its ampersands count real fields.
+    if (original.contains('#') ||
+        (original.contains('&') &&
+            '&'.allMatches(original).length !=
+                '&'
+                    .allMatches(
+                      Transformer.urlEncodeMap(query, options.listFormat),
+                    )
+                    .length)) {
+      return null;
+    }
+    if (!query.values.any((v) => v is List || v is ListParam || v is Map)) {
       return const {};
     }
     final display = <String, dynamic>{
       for (final entry in query.entries)
         entry.key: _sanitizeData(entry.value, forQuery: true),
     };
-    final original = Transformer.urlEncodeQueryMap(query, options.listFormat);
     final masked = Transformer.urlEncodeQueryMap(display, options.listFormat);
     if (original == masked) return const {};
-
-    // Joined maps can contain literal URI delimiters. Once a credential has
-    // split across fields or into a fragment, individual fields are ambiguous.
-    if (original.contains('#') ||
-        '&'.allMatches(original).length != '&'.allMatches(masked).length) {
-      return null;
-    }
-    final Map<String, List<String>> originalFields;
-    final Map<String, List<String>> maskedFields;
-    try {
-      originalFields = Uri(query: original).queryParametersAll;
-      maskedFields = Uri(query: masked).queryParametersAll;
-    } on FormatException {
-      return null;
-    } on ArgumentError {
-      return null;
-    }
+    final originalFields = _queryFields(original);
+    final maskedFields = _queryFields(masked);
+    if (originalFields == null || maskedFields == null) return null;
     final replacements = <(String, String), String>{};
     for (final entry in originalFields.entries) {
       final values = entry.value;
@@ -1387,6 +1377,47 @@ class DioLoggerInterceptor extends Interceptor {
       }
     }
     return replacements;
+  }
+
+  Map<String, List<String>>? _queryFields(String encoded) {
+    try {
+      return Uri(query: encoded).queryParametersAll;
+    } on FormatException {
+      return null;
+    } on ArgumentError {
+      return null;
+    }
+  }
+
+  void _printQueryParameters(
+    StringBuffer lines,
+    RequestOptions options,
+    _QueryMasks? queryMasks, {
+    int indent = 2,
+  }) {
+    if (!config.maskSensitiveData) {
+      _printMap(lines, options.queryParameters, indent: indent);
+      return;
+    }
+    final fields = queryMasks == null
+        ? null
+        : _queryFields(
+            _sanitizeEncodedFields(
+              Transformer.urlEncodeQueryMap(
+                options.queryParameters,
+                options.listFormat,
+              ),
+              queryMasks,
+            ),
+          );
+    if (fields == null) {
+      _printMultiline(lines, _masked, indent: indent);
+      return;
+    }
+    _printMap(lines, {
+      for (final entry in fields.entries)
+        entry.key: entry.value.length == 1 ? entry.value.single : entry.value,
+    }, indent: indent);
   }
 
   String _displayUri(String text, _QueryMasks? queryMasks) {
