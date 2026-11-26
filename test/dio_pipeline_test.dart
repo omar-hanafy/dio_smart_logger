@@ -210,6 +210,30 @@ void main() {
     },
   );
 
+  test('retains Unicode in request and error query snapshots', () async {
+    final adapter = _RecordingAdapter(ResponseBody.fromString('limited', 429));
+    final logs = <String>[];
+    final dio = _client(adapter, logs);
+    final inputs = {
+      'q': [
+        {'label': 'café', 'token': 'unicode-secret-marker'},
+      ],
+    };
+    await expectLater(
+      dio.get<String>(
+        '/search',
+        queryParameters: inputs,
+        options: Options(listFormat: ListFormat.csv),
+      ),
+      throwsA(isA<DioException>()),
+    );
+    expect(adapter.request.queryParameters, inputs);
+    for (final log in logs) {
+      expect(log, contains('q: {label: café, token: ***MASKED***}'));
+      _expectHidden(log, ['unicode-secret-marker']);
+    }
+  });
+
   test('masks named fields inside maps joined into a query value', () async {
     final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
     final logs = <String>[];

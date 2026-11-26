@@ -1399,17 +1399,15 @@ class DioLoggerInterceptor extends Interceptor {
       _printMap(lines, options.queryParameters, indent: indent);
       return;
     }
-    final fields = queryMasks == null
-        ? null
-        : _queryFields(
-            _sanitizeEncodedFields(
-              Transformer.urlEncodeQueryMap(
-                options.queryParameters,
-                options.listFormat,
-              ),
-              queryMasks,
-            ),
-          );
+    Map<String, List<String>>? fields;
+    if (queryMasks != null) {
+      final encoded = Transformer.urlEncodeQueryMap(
+        options.queryParameters,
+        options.listFormat,
+      );
+      final canonical = Uri(query: encoded).query;
+      fields = _queryFields(_sanitizeEncodedFields(canonical, queryMasks));
+    }
     if (fields == null) {
       _printMultiline(lines, _masked, indent: indent);
       return;
