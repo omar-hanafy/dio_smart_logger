@@ -348,7 +348,8 @@ class DioLoggerInterceptor extends Interceptor {
 
     try {
       final lines = StringBuffer();
-      final sanitizedUri = _requestUri(options);
+      final queryMasks = _queryMasks(options);
+      final sanitizedUri = _sanitizeUri(options.uri, queryMasks);
 
       // ───────────────────────────────────────────────────────────────────────
       // Header
@@ -359,8 +360,8 @@ class DioLoggerInterceptor extends Interceptor {
         _AnsiColors.cyan,
       );
       _kv(lines, 'URI', sanitizedUri.toString());
-      _kv(lines, 'BaseURL', _displayUri(options.baseUrl));
-      _kv(lines, 'Path', _displayUri(options.path));
+      _kv(lines, 'BaseURL', _displayUri(options.baseUrl, queryMasks));
+      _kv(lines, 'Path', _displayUri(options.path, queryMasks));
 
       // ───────────────────────────────────────────────────────────────────────
       // Request Configuration
@@ -403,7 +404,7 @@ class DioLoggerInterceptor extends Interceptor {
       if (config.effectiveLogRequestHeaders &&
           options.headers.isNotEmptyOrNull) {
         _section(lines, 'Headers');
-        final sanitizedHeaders = _sanitizeHeaders(options.headers);
+        final sanitizedHeaders = _sanitizeHeaders(options.headers, queryMasks);
         _printMap(lines, sanitizedHeaders);
       }
 
@@ -431,7 +432,7 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'cURL');
         _printMultiline(
           lines,
-          _generateCurl(options, sanitizedUri),
+          _generateCurl(options, sanitizedUri, queryMasks),
           indent: config.makeSectionsCopyable ? 0 : 2,
           copyable: config.makeSectionsCopyable,
         );
@@ -484,7 +485,8 @@ class DioLoggerInterceptor extends Interceptor {
         '${response.statusCode} ${response.statusMessage ?? ""}',
         color,
       );
-      final displayedUri = _responseUri(response);
+      final queryMasks = _queryMasks(req);
+      final displayedUri = _sanitizeUri(response.realUri, queryMasks);
       _kv(lines, 'URI', displayedUri);
       _kv(lines, 'Duration', '$duration ms');
 
@@ -514,7 +516,7 @@ class DioLoggerInterceptor extends Interceptor {
           _kv(
             lines,
             '${i + 1}. [${r.statusCode}] ${r.method}',
-            _sanitizeUri(r.location),
+            _sanitizeUri(r.location, queryMasks),
           );
         }
         _kv(lines, 'Final URI', displayedUri);
@@ -526,7 +528,7 @@ class DioLoggerInterceptor extends Interceptor {
       if (config.effectiveLogResponseHeaders &&
           response.headers.map.isNotEmptyOrNull) {
         _section(lines, 'Headers');
-        _printMap(lines, _sanitizeHeaders(response.headers.map));
+        _printMap(lines, _sanitizeHeaders(response.headers.map, queryMasks));
       }
 
       _maybePrintRateLimit(lines, response.headers);
@@ -621,7 +623,8 @@ class DioLoggerInterceptor extends Interceptor {
         '❌ ERROR [${ctx?.id ?? "-"}] ${req.method}$statusPart',
         _AnsiColors.red,
       );
-      final sanitizedUri = _requestUri(req);
+      final queryMasks = _queryMasks(req);
+      final sanitizedUri = _sanitizeUri(req.uri, queryMasks);
       _kv(lines, 'URI', sanitizedUri);
       _kv(lines, 'Duration', '$duration ms');
       _kv(lines, 'Type', err.type.name);
@@ -647,7 +650,7 @@ class DioLoggerInterceptor extends Interceptor {
       // Root Cause Analysis (Forensic Error Details)
       // ─────────────────────────────────────────────────────────────────────────
       _section(lines, 'Root Cause Analysis');
-      _printErrorDetails(lines, err);
+      _printErrorDetails(lines, err, queryMasks);
 
       // Rate-limit headers are high-value on 429/503 errors; surface them
       // regardless of the response-snapshot setting.
@@ -686,7 +689,11 @@ class DioLoggerInterceptor extends Interceptor {
 
         if (req.headers.isNotEmptyOrNull) {
           lines.writeln('│ Headers:');
-          _printMap(lines, _sanitizeHeaders(req.headers), indent: 4);
+          _printMap(
+            lines,
+            _sanitizeHeaders(req.headers, queryMasks),
+            indent: 4,
+          );
         }
 
         if (req.data != null) {
@@ -702,20 +709,24 @@ class DioLoggerInterceptor extends Interceptor {
         final res = err.response!;
         _section(lines, 'Response Snapshot');
         _kv(lines, 'Status', '${res.statusCode} ${res.statusMessage ?? ""}');
-        _kv(lines, 'Real URI', _responseUri(res));
+        _kv(lines, 'Real URI', _sanitizeUri(res.realUri, queryMasks));
 
         if (res.redirects.isNotEmptyOrNull) {
           lines.writeln('│ Redirects:');
           for (final r in res.redirects) {
             lines.writeln(
-              '│   ${r.statusCode} ${r.method} → ${_sanitizeUri(r.location)}',
+              '│   ${r.statusCode} ${r.method} → ${_sanitizeUri(r.location, queryMasks)}',
             );
           }
         }
 
         if (res.headers.map.isNotEmptyOrNull) {
           lines.writeln('│ Headers:');
-          _printMap(lines, _sanitizeHeaders(res.headers.map), indent: 4);
+          _printMap(
+            lines,
+            _sanitizeHeaders(res.headers.map, queryMasks),
+            indent: 4,
+          );
         }
 
         if (res.data != null) {
@@ -737,7 +748,7 @@ class DioLoggerInterceptor extends Interceptor {
         _section(lines, 'Retry cURL');
         _printMultiline(
           lines,
-          _generateCurl(req, sanitizedUri),
+          _generateCurl(req, sanitizedUri, queryMasks),
           indent: config.makeSectionsCopyable ? 0 : 2,
           copyable: config.makeSectionsCopyable,
         );
@@ -773,7 +784,11 @@ class DioLoggerInterceptor extends Interceptor {
 
   // FORENSIC ERROR ANALYSIS
 
-  void _printErrorDetails(StringBuffer lines, DioException err) {
+  void _printErrorDetails(
+    StringBuffer lines,
+    DioException err,
+    _QueryMasks? queryMasks,
+  ) {
     switch (err.type) {
       case DioExceptionType.connectionTimeout:
         lines.writeln('│ ⏱️ CONNECTION TIMEOUT');
@@ -784,7 +799,7 @@ class DioLoggerInterceptor extends Interceptor {
         lines.writeln(
           '│   Target: ${err.requestOptions.uri.host}:${err.requestOptions.uri.port}',
         );
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
 
       case DioExceptionType.sendTimeout:
         lines.writeln('│ ⏱️ SEND TIMEOUT');
@@ -801,7 +816,7 @@ class DioLoggerInterceptor extends Interceptor {
             lines.writeln('│   Data size: ${_formatBytes(size)}');
           }
         }
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
 
       case DioExceptionType.receiveTimeout:
         lines.writeln('│ ⏱️ RECEIVE TIMEOUT');
@@ -809,7 +824,7 @@ class DioLoggerInterceptor extends Interceptor {
         lines.writeln(
           '│   Configured timeout: ${err.requestOptions.receiveTimeout}',
         );
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
 
       case DioExceptionType.transformTimeout:
         lines.writeln('│ ⏱️ TRANSFORM TIMEOUT');
@@ -818,7 +833,7 @@ class DioLoggerInterceptor extends Interceptor {
         lines.writeln(
           '│   Configured timeout: ${err.requestOptions.transformTimeout}',
         );
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
 
       case DioExceptionType.badCertificate:
         lines.writeln('│ 🔒 BAD CERTIFICATE');
@@ -842,16 +857,20 @@ class DioLoggerInterceptor extends Interceptor {
       case DioExceptionType.connectionError:
         lines.writeln('│ 🔌 CONNECTION ERROR');
         lines.writeln('│   Failed to establish connection.');
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
 
       case DioExceptionType.unknown:
         lines.writeln('│ ❓ UNKNOWN ERROR');
         lines.writeln('│   An unexpected error occurred.');
-        _printUnderlyingError(lines, err.error);
+        _printUnderlyingError(lines, err.error, queryMasks);
     }
   }
 
-  void _printUnderlyingError(StringBuffer lines, Object? error) {
+  void _printUnderlyingError(
+    StringBuffer lines,
+    Object? error,
+    _QueryMasks? queryMasks,
+  ) {
     if (error == null) return;
     final typeName = error.runtimeType.toString();
     final dynamic e = error;
@@ -895,7 +914,7 @@ class DioLoggerInterceptor extends Interceptor {
     try {
       final uri = e.uri;
       if (uri is Uri || uri is String) {
-        lines.writeln('│   │ URI: ${_displayUri(uri.toString())}');
+        lines.writeln('│   │ URI: ${_displayUri(uri.toString(), queryMasks)}');
       }
     } catch (_) {}
 
@@ -919,7 +938,11 @@ class DioLoggerInterceptor extends Interceptor {
 
   // CURL GENERATOR
 
-  String _generateCurl(RequestOptions options, Uri uri) {
+  String _generateCurl(
+    RequestOptions options,
+    Uri uri,
+    _QueryMasks? queryMasks,
+  ) {
     final method = options.method;
     final methodArg = RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(method)
         ? method
@@ -928,7 +951,7 @@ class DioLoggerInterceptor extends Interceptor {
 
     // Headers. curl recomputes Content-Length from the actual body, so a
     // stale value carried in the request options would corrupt the command.
-    _sanitizeHeaders(options.headers).forEach((key, value) {
+    _sanitizeHeaders(options.headers, queryMasks).forEach((key, value) {
       if (key.toLowerCase() != 'content-length') {
         components.add("-H '${_escapeShellArg('$key: $value')}'");
       }
@@ -1314,42 +1337,100 @@ class DioLoggerInterceptor extends Interceptor {
 
   // SANITIZATION
 
-  Uri _requestUri(RequestOptions options) {
-    if (!config.maskSensitiveData || options.queryParameters.isEmpty) {
-      return _sanitizeUri(options.uri);
+  // A redirect or exception can copy serialized query fields onto a different
+  // URL. Match those fields by decoded name and value so parameter reordering,
+  // escaping and path changes still use the original per-element redaction.
+  _QueryMasks? _queryMasks(RequestOptions options) {
+    final query = options.queryParameters;
+    if (!config.maskSensitiveData ||
+        !query.values.any(
+          (value) => value is List || value is ListParam || value is Map,
+        )) {
+      return const {};
     }
-    // CSV, pipe and space-separated parameters lose their element boundaries
-    // after Dio serializes them. Mask each supplied value first.
-    final display = options.copyWith(
-      queryParameters: {
-        for (final entry in options.queryParameters.entries)
-          entry.key: _sanitizeData(entry.value, forQuery: true),
-      },
-    );
-    return _sanitizeUri(display.uri);
+    final display = <String, dynamic>{
+      for (final entry in query.entries)
+        entry.key: _sanitizeData(entry.value, forQuery: true),
+    };
+    final original = Transformer.urlEncodeQueryMap(query, options.listFormat);
+    final masked = Transformer.urlEncodeQueryMap(display, options.listFormat);
+    if (original == masked) return const {};
+
+    // Joined maps can contain literal URI delimiters. Once a credential has
+    // split across fields or into a fragment, individual fields are ambiguous.
+    if (original.contains('#') ||
+        '&'.allMatches(original).length != '&'.allMatches(masked).length) {
+      return null;
+    }
+    final Map<String, List<String>> originalFields;
+    final Map<String, List<String>> maskedFields;
+    try {
+      originalFields = Uri(query: original).queryParametersAll;
+      maskedFields = Uri(query: masked).queryParametersAll;
+    } on FormatException {
+      return null;
+    } on ArgumentError {
+      return null;
+    }
+    final replacements = <(String, String), String>{};
+    for (final entry in originalFields.entries) {
+      final values = entry.value;
+      final safe = maskedFields[entry.key];
+      if (safe == null || safe.length != values.length) {
+        if (_isSensitiveKey(entry.key)) continue;
+        return null;
+      }
+      for (var i = 0; i < values.length; i++) {
+        if (safe[i] != values[i]) {
+          replacements[(entry.key, values[i])] = safe[i];
+        }
+      }
+    }
+    return replacements;
   }
 
-  Uri _responseUri(Response<dynamic> response) => response.redirects.isEmpty
-      ? _requestUri(response.requestOptions)
-      : _sanitizeUri(response.realUri);
-
-  String _displayUri(String text) {
+  String _displayUri(String text, _QueryMasks? queryMasks) {
     if (!config.maskSensitiveData || text.isEmpty) return text;
     final uri = Uri.tryParse(text);
-    return uri == null ? '<invalid URI>' : _sanitizeUri(uri).toString();
+    return uri == null
+        ? '<invalid URI>'
+        : _sanitizeUri(uri, queryMasks).toString();
   }
 
-  Uri _sanitizeUri(Uri uri) {
+  Uri _sanitizeUri(Uri uri, _QueryMasks? queryMasks) {
     if (!config.maskSensitiveData) return uri;
+    final userInfo = uri.userInfo.isEmpty ? null : _masked;
+    if (queryMasks == null) {
+      return uri.replace(
+        userInfo: userInfo,
+        query: uri.hasQuery ? _masked : null,
+        fragment: uri.hasFragment ? _masked : null,
+      );
+    }
+    // Dio can append query parameters after an existing fragment.
+    final fragment = uri.fragment;
+    final fieldsStart = fragment.indexOf('?') + 1;
     return uri.replace(
-      userInfo: uri.userInfo.isEmpty ? null : _masked,
-      query: uri.hasQuery ? _sanitizeEncodedFields(uri.query) : null,
+      userInfo: userInfo,
+      query: uri.hasQuery
+          ? _sanitizeEncodedFields(uri.query, queryMasks)
+          : null,
+      fragment: uri.hasFragment
+          ? fragment.substring(0, fieldsStart) +
+                _sanitizeEncodedFields(
+                  fragment.substring(fieldsStart),
+                  queryMasks,
+                )
+          : null,
     );
   }
 
   // Preserve repeated fields, their order and original encoding. Decode only
   // for matching, so a URI or form with no sensitive fields keeps its spelling.
-  String _sanitizeEncodedFields(String fields) {
+  String _sanitizeEncodedFields(
+    String fields, [
+    _QueryMasks queryMasks = const {},
+  ]) {
     if (!config.maskSensitiveData || fields.isEmpty) return fields;
     return fields
         .split('&')
@@ -1362,8 +1443,13 @@ class DioLoggerInterceptor extends Interceptor {
             final value = Uri.decodeQueryComponent(
               field.substring(separator + 1),
             );
-            if (_shouldMask(key, value)) {
-              return '$encodedKey=${Uri.encodeQueryComponent(_masked)}';
+            final projected = queryMasks[(key, value)];
+            final maskWholeField =
+                _isSensitiveKey(key) ||
+                _looksLikeSensitiveValue(projected ?? value);
+            final safe = maskWholeField ? _masked : projected;
+            if (safe != null) {
+              return '$encodedKey=${Uri.encodeQueryComponent(safe)}';
             }
           } on ArgumentError {
             return _masked;
@@ -1379,12 +1465,19 @@ class DioLoggerInterceptor extends Interceptor {
       config.maskSensitiveData &&
       (_isSensitiveKey(key) || _looksLikeSensitiveValue(value));
 
-  Map<String, Object?> _sanitizeHeaders(Map<String, Object?> headers) => {
+  Map<String, Object?> _sanitizeHeaders(
+    Map<String, Object?> headers, [
+    _QueryMasks? queryMasks = const {},
+  ]) => {
     for (final entry in headers.entries)
-      entry.key: ?_headerValue(entry.key, entry.value),
+      entry.key: ?_headerValue(entry.key, entry.value, queryMasks),
   };
 
-  Object? _headerValue(String key, Object? value) {
+  Object? _headerValue(
+    String key,
+    Object? value, [
+    _QueryMasks? queryMasks = const {},
+  ]) {
     final name = key.toLowerCase();
     if (value == null || _headerBlacklistLower.contains(name)) return null;
     if (config.maskSensitiveData && _isSensitiveKey(key)) return _masked;
@@ -1396,7 +1489,7 @@ class DioLoggerInterceptor extends Interceptor {
               name == 'referer')) {
         return _looksLikeSensitiveValue(item)
             ? _masked
-            : _displayUri(item.toString());
+            : _displayUri(item.toString(), queryMasks);
       }
       return _sanitizeData(item);
     }
@@ -1713,6 +1806,8 @@ class DioLoggerInterceptor extends Interceptor {
 }
 
 // INTERNAL CLASSES
+
+typedef _QueryMasks = Map<(String, String), String>;
 
 class _LogContext {
   _LogContext(this.id, this.startTime, this.stopwatch);

@@ -191,6 +191,206 @@ void main() {
     }
   });
 
+  test(
+    'masks structured query fields that Dio appends after a fragment',
+    () async {
+      final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
+      final logs = <String>[];
+      final dio = _client(adapter, logs);
+      await dio.get<String>(
+        '/article#comments',
+        queryParameters: {'note': 'Bearer fragment-marker', 'view': 'recent'},
+      );
+      expect(adapter.request.uri.fragment, contains('fragment-marker'));
+      for (final log in logs) {
+        _expectHidden(log, ['fragment-marker']);
+        expect(log, contains('#comments?'));
+        expect(log, contains('view=recent'));
+      }
+    },
+  );
+
+  test('masks named fields inside maps joined into a query value', () async {
+    final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
+    final logs = <String>[];
+    final dio = _client(adapter, logs);
+    await dio.get<String>(
+      '/search',
+      queryParameters: {
+        'q': [
+          {'token': 'nested-field-marker', 'label': 'listed'},
+        ],
+      },
+      options: Options(listFormat: ListFormat.csv),
+    );
+    expect(
+      adapter.request.uri.queryParameters['q'],
+      contains('nested-field-marker'),
+    );
+    for (final log in logs) {
+      _expectHidden(log, ['nested-field-marker']);
+      expect(log, contains('listed'));
+    }
+  });
+
+  test(
+    'keeps nested CSV field separators from exposing masked values',
+    () async {
+      for (final separator in ['#', '&', '%26', '=', '?', '+', '%FF']) {
+        final inputs = {
+          'q': [
+            {'password': 'first${separator}private-tail', 'label': 'entry'},
+          ],
+        };
+        final forwarded = RequestOptions(
+          path: 'https://cdn.example/search',
+          queryParameters: inputs,
+          listFormat: ListFormat.csv,
+        ).uri;
+        final adapter = _RecordingAdapter(
+          ResponseBody.fromString(
+            'ok',
+            200,
+            headers: {
+              'content-location': [forwarded.toString()],
+            },
+          )..redirects = [RedirectRecord(302, 'GET', forwarded)],
+        );
+        final logs = <String>[];
+        final dio = _client(adapter, logs);
+        final response = await dio.get<String>(
+          '/search',
+          queryParameters: inputs,
+          options: Options(listFormat: ListFormat.csv),
+        );
+        expect(response.realUri, forwarded);
+        expect(adapter.request.queryParameters, inputs);
+        expect(logs.first, contains('REQUEST'));
+        expect(logs.last, contains('RESPONSE'));
+        _expectHidden(logs.join('\n'), ['private-tail']);
+      }
+    },
+  );
+
+  test(
+    'masks credentials assembled across a space-separated query list',
+    () async {
+      final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
+      final logs = <String>[];
+      final dio = _client(adapter, logs);
+      await dio.get<String>(
+        '/search',
+        queryParameters: {
+          'q': ['Bearer', 'assembled-marker', 'Basic other'],
+        },
+        options: Options(listFormat: ListFormat.ssv),
+      );
+      expect(
+        adapter.request.uri.queryParameters['q'],
+        contains('Bearer assembled-marker'),
+      );
+      _expectHidden(logs.last, ['assembled-marker']);
+    },
+  );
+
+  test('keeps safe neighbors after a credential in a joined query', () async {
+    final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
+    final logs = <String>[];
+    final dio = _client(adapter, logs);
+    final values = ['Bearer leading-marker', 'visible-neighbor'];
+    await dio.get<String>(
+      '/search',
+      queryParameters: {
+        'q': values,
+        'token': ['Bearer secret-marker', 'hidden-neighbor'],
+      },
+      options: Options(listFormat: ListFormat.csv),
+    );
+    expect(
+      adapter.request.uri.queryParameters['q'],
+      'Bearer leading-marker,visible-neighbor',
+    );
+    expect(
+      adapter.request.uri.queryParameters['token'],
+      contains('hidden-neighbor'),
+    );
+    for (final log in logs) {
+      _expectHidden(log, [
+        'leading-marker',
+        'secret-marker',
+        'hidden-neighbor',
+      ]);
+      expect(log, contains('visible-neighbor'));
+    }
+  });
+
+  test(
+    'masks a forwarded joined query in redirect and header diagnostics',
+    () async {
+      final target = Uri.parse(
+        'https://cdn.example/search/?page=1&note=ordinary,Bearer+copied-marker',
+      );
+      final adapter = _RecordingAdapter(
+        ResponseBody.fromString(
+          'ok',
+          200,
+          headers: {
+            'content-location': [target.toString()],
+          },
+        )..redirects = [RedirectRecord(301, 'GET', target)],
+      );
+      final logs = <String>[];
+      final dio = _client(adapter, logs);
+      final fields = {
+        'note': ['ordinary', 'Bearer copied-marker'],
+      };
+      final response = await dio.get<String>(
+        '/search',
+        queryParameters: fields,
+        options: Options(listFormat: ListFormat.csv),
+      );
+      expect(response.realUri, target);
+      expect(response.headers.value('content-location'), target.toString());
+      final redirected = logs.last;
+      _expectHidden(redirected, ['copied-marker']);
+      expect(redirected, contains('ordinary'));
+      expect(redirected, contains('page=1'));
+    },
+  );
+
+  test(
+    'masks a forwarded joined query in transport error diagnostics',
+    () async {
+      final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
+      final logs = <String>[];
+      final dio = _client(adapter, logs);
+      final fields = {
+        'note': ['ordinary', 'Bearer copied-marker'],
+      };
+      await expectLater(
+        dio.get<String>(
+          '/search',
+          queryParameters: fields,
+          options: Options(
+            listFormat: ListFormat.csv,
+            responseDecoder: (_, options, _) =>
+                throw _EndpointException(options.uri),
+          ),
+        ),
+        throwsA(
+          isA<DioException>().having(
+            (e) => e.error,
+            'cause',
+            isA<_EndpointException>(),
+          ),
+        ),
+      );
+      expect(logs.last, contains('The resource is unavailable'));
+      _expectHidden(logs.last, ['copied-marker']);
+      expect(logs.last, contains('ordinary'));
+    },
+  );
+
   test('handles Uri and iterable request header values', () async {
     final adapter = _RecordingAdapter(ResponseBody.fromString('ok', 200));
     final logs = <String>[];
