@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
@@ -24,23 +24,20 @@ jobs:
           sdk: stable
 
       - name: Version channel check
-        if: github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')
+        env:
+          TARGET_LANE: ${{ github.base_ref || github.ref_name }}
+        shell: bash
         run: |
-          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -q '^pubspec.yaml$'; then
-            version=$(awk '/^version:/ {print $2}' pubspec.yaml)
-            if [[ "${{ github.base_ref }}" == "main" ]]; then
-              if [[ "$version" == *-* ]]; then
-                echo "Main requires a stable version (no pre-release suffix)."
-                exit 1
-              fi
-            else
-              if [[ "$version" != *-* ]]; then
-                echo "Dev requires a pre-release version suffix (e.g. -dev.1)."
-                exit 1
-              fi
-            fi
-          else
-            echo "pubspec.yaml not changed; skipping version channel check."
+          version=$(yq -er '.version' pubspec.yaml)
+          core='[0-9]+\.[0-9]+\.[0-9]+'
+          identifiers='[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*'
+          if [[ "$TARGET_LANE" == main && ! "$version" =~ ^$core(\+$identifiers)?$ ]]; then
+            echo "main requires a stable version, got $version."
+            exit 1
+          fi
+          if [[ "$TARGET_LANE" == dev && ! "$version" =~ ^$core-$identifiers(\+$identifiers)?$ ]]; then
+            echo "dev requires a prerelease version, got $version."
+            exit 1
           fi
 
       - name: Install dependencies
@@ -61,7 +58,9 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Dart (beta)
         uses: dart-lang/setup-dart@v1
@@ -82,7 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
@@ -93,21 +94,7 @@ jobs:
         run: dart pub get
 
       - name: Install pana
-        run: dart pub global activate pana
+        run: dart pub global activate pana 0.23.19
 
       - name: Run pana
-        run: |
-          pana --json > pana.json
-          python3 - <<'PY'
-          import json
-          with open('pana.json') as f:
-            data = json.load(f)
-          scores = data.get('scores', {})
-          granted = scores.get('grantedPoints', 0)
-          max_points = scores.get('maxPoints', 0)
-          if max_points == 0:
-            raise SystemExit('pana did not report scores; failing.')
-          if granted != max_points:
-            raise SystemExit(f'pana score {granted}/{max_points} (full score required).')
-          print(f'pana score {granted}/{max_points}')
-          PY
+        run: pana --exit-code-threshold 0 .

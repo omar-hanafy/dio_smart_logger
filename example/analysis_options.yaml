@@ -1,0 +1,7 @@
+include: ../analysis_options.yaml
+
+linter:
+  rules:
+    public_member_api_docs: false
+    comment_references: false
+    prefer_asserts_with_message: false

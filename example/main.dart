@@ -1,23 +1,45 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:dio_smart_logger/dio_smart_logger.dart';
 
 Future<void> main() async {
-  final dio = Dio();
-
-  // Attach the logger. Use a ready-made preset:
-  //   DioLoggerConfig.development() - verbose logs, cURL, colors
-  //   DioLoggerConfig.production()  - errors only, no bodies/cURL (release-safe)
-  //   DioLoggerConfig.errorsOnly()  - failures only, with full forensic detail
-  // ...or build a DioLoggerConfig by hand for fine-grained control.
+  final dio = Dio()..httpClientAdapter = _StatusAdapter();
   dio.interceptors.add(
-    DioLoggerInterceptor(config: DioLoggerConfig.development()),
+    DioLoggerInterceptor(
+      config: const DioLoggerConfig(
+        printer: print,
+        useColors: false,
+        logResponseBody: true,
+      ),
+    ),
   );
 
-  // To skip logging for a single request, set the opt-out flag in `extra`:
-  //   dio.get(
-  //     '/health',
-  //     options: Options(extra: {DioLoggerInterceptor.disableLoggingKey: true}),
-  //   );
+  try {
+    await dio.get<Map<String, Object?>>(
+      'https://api.example.test/status',
+      options: Options(headers: {'Authorization': 'Bearer demo-credential'}),
+    );
+  } finally {
+    dio.close();
+  }
+}
 
-  print('Dio logger interceptor is attached and ready.');
+// Return a JSON response locally so the example can run offline.
+class _StatusAdapter implements HttpClientAdapter {
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async => ResponseBody.fromString(
+    '{"status":"ok"}',
+    200,
+    headers: {
+      Headers.contentTypeHeader: [Headers.jsonContentType],
+    },
+  );
+
+  @override
+  void close({bool force = false}) {}
 }

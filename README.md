@@ -9,8 +9,8 @@ A production-focused logging interceptor for [Dio](https://pub.dev/packages/dio)
 
 - **Structured Output:** Clean, easy-to-read request, response, and error logs.
 - **Configurable Levels:** Fine-grained control with `none`, `error`, `info`, `debug`, and `verbose` levels.
-- **Security First:** Built-in sensitive data masking for headers, query params, and request/response bodies.
-- **cURL Generation:** Ready-to-use cURL commands for easy request reproduction.
+- **Data masking** covers headers, query parameters, and fields in structured request and response bodies.
+- **cURL output** shows the request with placeholders for masked values.
 - **Performance Metrics:** Track request duration, payload size, and transfer rate.
 - **Advanced Error Diagnostics:** Detailed root-cause analysis mapped by `DioExceptionType`.
 - **Flexibility:** Optional request filtering and custom printer callbacks.
@@ -24,7 +24,7 @@ Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dio_smart_logger: ^0.3.0 # Or the latest version
+  dio_smart_logger: ^0.3.1
 ```
 
 Then run:
@@ -63,21 +63,22 @@ dio.interceptors.add(
 
 ### Presets
 
-Skip the boilerplate with a ready-made configuration:
+Choose one preset for your interceptor.
+
+| Preset | Output |
+| --- | --- |
+| `DioLoggerConfig.development()` | Verbose request and response logs with cURL and colors. |
+| `DioLoggerConfig.production()` | Errors only, with snapshots, cURL, stack traces, and colors disabled. |
+| `DioLoggerConfig.errorsOnly()` | Failed requests with request and response snapshots, cURL, and a call-site stack trace when available. |
 
 ```dart
-// Verbose logs, cURL, colors - ideal for local development.
 dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.development()));
-
-// Errors only, no bodies or cURL, no colors - a safe default for release builds.
-dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.production()));
-
-// Only failed requests, but with full forensic detail (snapshots, cURL).
-dio.interceptors.add(DioLoggerInterceptor(config: DioLoggerConfig.errorsOnly()));
 ```
 
-> Tip: add the logger as the **last** request interceptor (so it is the first to
-> see the response) for the most representative `Duration` measurement.
+Register the logger after any interceptor that adds headers you want to see.
+Dio calls both request and response interceptors in registration order.
+`Duration` starts in the logger's request callback and ends in its response or
+error callback, so it includes time spent in earlier response interceptors.
 
 ## 🛠️ Advanced Configuration
 
@@ -90,7 +91,7 @@ const loggerConfig = DioLoggerConfig(
   showCurl: true,
   showPerformanceMetrics: true,
   logErrorStackTrace: true,
-  maxBodyBytes: 64 * 1024, // Truncate bodies larger than 64KB
+  maxBodyBytes: 64 * 1024, // Limit rendered body text in UTF-16 code units
   requestFilter: _logOnlyApiHost, // Filter which requests to log
 );
 
@@ -133,21 +134,28 @@ dio.get(
 
 ## 🔒 Security Notes
 
-- **Auto-Masking:** By default, common sensitive keys (like passwords, tokens, API keys) are masked with `***MASKED***`.
-- **Value-based Masking:** Sensitive-looking values (e.g. `Bearer` tokens and JWTs) are masked even when they appear under a non-obvious key.
-- **Custom Secrets:** You can extend the list of masked keys for your project:
+- With masking enabled (the default), a key containing a sensitive fragment such as `password` or `token` has its value replaced by `***MASKED***`. Matching is case-insensitive.
+- String values in structured data are also checked for patterns such as `Bearer …`, `Basic …`, and JWT-like strings. For endpoints with secrets embedded in free-form text or URL paths, use `requestFilter` or the per-request opt-out.
+- Setting `sensitiveKeys` replaces the default list. To keep the defaults and add a project-specific key, spread them into the new list.
+
   ```dart
-  DioLoggerConfig(
-    sensitiveKeys: ['my_custom_secret', 'social_security_number'],
-  )
+  final config = DioLoggerConfig(
+    sensitiveKeys: [
+      ...const DioLoggerConfig().sensitiveKeys,
+      'membership_number',
+    ],
+  );
   ```
-- **Header Blacklist:** Completely suppress specific headers from being logged using the `headerBlacklist` parameter.
+
+- Use `headerBlacklist` to omit named headers from header output. Header names match case-insensitively. The logger masks URI credentials and sensitive query parameters in `Location`, `Content-Location`, and `Referer`. Add other headers carrying private URLs to the blacklist. If Dio emits a literal field or fragment separator inside a query value, the logger masks that request’s query and fragment because their boundaries are ambiguous.
 
 ## 💡 Example
 
-Check out the [`example/main.dart`](example/main.dart) file for a runnable setup with a mock adapter.
+The example makes a `GET /status` request through Dio. An in-memory adapter
+returns a JSON response with status `200`. The terminal shows the
+`Authorization` header as `***MASKED***` and shows `"status": "ok"` in the response body. [Example source](example/main.dart)
 
-Run the example from the terminal:
+Run it from the package root.
 
 ```bash
 dart run example/main.dart
